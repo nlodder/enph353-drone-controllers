@@ -1,0 +1,9 @@
+<launch>
+    <!-- 'name="node_name"' attribute should match the name in the python file -->
+    <!-- rospy.init_node('node_name', anonymous=True) -->
+    <node pkg="teleop_twist_keyboard"
+        type="teleop_twist_keyboard.py"
+        name="drone_manual_controller"
+        output="screen"
+        launch-prefix="xterm -e" />
+</launch>

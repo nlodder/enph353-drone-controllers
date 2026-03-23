@@ -3,7 +3,6 @@ import rospy
 from std_msgs.msg import String
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-import math
 
 class DroneTimeTrialNode:
     def __init__(self):

@@ -1,4 +1,3 @@
 <launch>    
-    <!-- node to direct twist messages to the drone to their planar and vertical handlers -->
 	<node pkg="drone_time_trials" type="drone_time_trials.py" name="drone_time_trials" output="screen" />
 </launch>

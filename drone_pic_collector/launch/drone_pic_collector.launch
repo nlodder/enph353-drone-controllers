@@ -1,0 +1,16 @@
+<launch>    
+	<arg name="pics_per_sign" default="20" />
+	<arg name="pics_data_path" default="=sign_pics/" />
+	<arg name="ellipse_width" default="1.5"/>
+	<arg name="ellipse_height" default="1"/>
+	<arg name="distance_from_sign" default="0.5"/>
+
+    <node pkg="drone_pic_collector" type="drone_pic_collector.py" name="drone_pic_collector" output="screen">
+        <!-- these are the values that are passed to our constructor inside the python script-->
+		<param name="data_path" value="$(arg pics_data_path)" />
+		<param name="pics_per_sign" value="$(arg pics_per_sign)"/>
+		<param name="ellipse_width" value="$(arg ellipse_width)"/>
+		<param name="ellipse_height" value="$(arg ellipse_height)"/>
+		<param name="distance_from_sign" value="$(arg distance_from_sign)"/>
+    </node>
+</launch>

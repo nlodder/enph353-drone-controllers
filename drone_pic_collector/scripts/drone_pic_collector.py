@@ -22,11 +22,17 @@ class DronePicCollectNode:
         """
         rospy.init_node('drone_pic_collector', anonymous=True)
 
+        # get constructor args from ROS param service
+        raw_path = rospy.get_param('~data_path', "sign_pics")
+        self.PICS_PER_SIGN = rospy.get_param('~pics_per_sign', 20)
+        self.ELLIPSE_W = rospy.get_param('~ellipse_width', 1.5)
+        self.ELLIPSE_H = rospy.get_param('~ellipse_height', 1)
+        self.PERP_DIST_FROM_SIGN = rospy.get_param('~distance_from_sign', 0.5)
+
         # get package path using Roses package management
         rospack = rospkg.RosPack()
         package_path = rospack.get_path('drone_pic_collector')
 
-        raw_path = rospy.get_param('~data_path', "sign_pics")
 
         # if user provided relative path, join to package path
         if not raw_path.startswith('/') and not raw_path.startswith('~'):
@@ -43,9 +49,6 @@ class DronePicCollectNode:
             except OSError as e:
                 rospy.logerr(f"Could not create directory {self.DATA_PATH}: {e}")
 
-        self.PICS_PER_SIGN = rospy.get_param('~pics_per_sign', 20)
-        self.ELLIPSE_W = rospy.get_param('~ellipse_width', 2)
-        self.ELLIPSE_H = rospy.get_param('~ellipse_height', 1)
 
         self.ns = rospy.get_namespace().strip('/')
         self.bridge = CvBridge()
@@ -65,7 +68,7 @@ class DronePicCollectNode:
 
         Pose = namedtuple('Pose', ['x', 'y', 'z', 'yaw'])
 
-        # absolute positions of each sign
+        # absolute positions of each sign x (m), y (m), z (m), yaw (degrees)
         abs_sign_dict = {
             1: Pose( 5.81,  1.64,  0.1,  270),
             2: Pose( 5.16, -1.35,  0.1,  270),
@@ -81,8 +84,8 @@ class DronePicCollectNode:
         for i in range(1, 8):
             old_pose = abs_sign_dict[i]
             yaw_rad = math.radians(old_pose.yaw)
-            offset_x = old_pose.x - math.cos(yaw_rad)
-            offset_y = old_pose.y - math.sin(yaw_rad)
+            offset_x = old_pose.x - self.PERP_DIST_FROM_SIGN * math.cos(yaw_rad)
+            offset_y = old_pose.y - self.PERP_DIST_FROM_SIGN * math.sin(yaw_rad)
 
             self.sign_dict[i] = Pose(offset_x, offset_y, old_pose.z, old_pose.yaw)
         

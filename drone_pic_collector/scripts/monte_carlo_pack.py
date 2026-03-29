@@ -23,8 +23,8 @@ class MonteCarloPack:
         """
         # use grid with 10 000 points per metre each with mass = 1
         
-        resolution_x = horiz_axis * self.GRID_DENSITY
-        resolution_y = vert_axis * self.GRID_DENSITY
+        resolution_x = round(horiz_axis * self.GRID_DENSITY)
+        resolution_y = round(vert_axis * self.GRID_DENSITY)
         a = round(horiz_axis * self.GRID_DENSITY/2)
         b = round(vert_axis * self.GRID_DENSITY/2)
         print(f"Ellipse size: a={horiz_axis}m, b={vert_axis}m")

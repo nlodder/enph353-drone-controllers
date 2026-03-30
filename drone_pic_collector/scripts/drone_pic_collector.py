@@ -69,20 +69,21 @@ class DronePicCollectNode:
         Pose = namedtuple('Pose', ['x', 'y', 'z', 'yaw'])
 
         # absolute positions of each sign x (m), y (m), z (m), yaw (degrees)
-        abs_sign_dict = {
+        self.abs_sign_dict = {
             1: Pose( 5.81,  1.64,  0.1,  270),
             2: Pose( 5.16, -1.35,  0.1,  270),
             3: Pose( 4.00, -1.67,  0.1,  180),
             4: Pose( 0.83, -0.54,  0.1,   90),
             5: Pose( 0.83,  1.50,  0.1,  270),
             6: Pose(-3.41,  1.71,  0.1,  180),
-            7: Pose(-3.80, -2.01,  0.1,    0)
+            7: Pose(-3.80, -2.01,  0.1,    0),
+            8: Pose(-0.90, -1.20,  1.96,   0)
         }
 
         # create locations that offset the drone from the sign 
-        self.sign_dict = abs_sign_dict
-        for i in range(1, 8):
-            old_pose = abs_sign_dict[i]
+        self.sign_dict = self.abs_sign_dict.copy()
+        for i in range(1, 9):
+            old_pose = self.abs_sign_dict[i]
             yaw_rad = math.radians(old_pose.yaw)
             offset_x = old_pose.x - self.PERP_DIST_FROM_SIGN * math.cos(yaw_rad)
             offset_y = old_pose.y - self.PERP_DIST_FROM_SIGN * math.sin(yaw_rad)
@@ -95,19 +96,6 @@ class DronePicCollectNode:
         self.mcp = mcp.MonteCarloPack()
         # generates list of horizontal and z coordinates for robot to position at for each photo
         self.stops = self.mcp.get_point_list(self.ELLIPSE_W, self.ELLIPSE_H, self.PICS_PER_SIGN, 15)
-
-
-    # def image_callback(self, data):
-    #     if not self.take_pic:
-    #         return
-    #     rospy.loginfo(f"Collecting photos at sign {self.current_sign}...")
-    #     try:
-    #         cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
-    #         self.pic_num += self.pic_num
-    #         suffix = "{:04d}".format(self.pic_num)
-    #         cv.imwrite(os.path.join(self.DATA_PATH, f"sign{self.current_sign}_{suffix}.png"), cv_image)
-    #     except CvBridgeError as e:
-    #         rospy.logerr(f"CvBridge Error: {e}")
     
     def fly_to_pos(self, x, y, z, yaw):
         """
@@ -150,30 +138,33 @@ class DronePicCollectNode:
                 print(f"Service call failed: {e}")
             return
     
-    def fly_to_sign(self, sign_num):
-        x = self.sign_dict[sign_num].x
-        y = self.sign_dict[sign_num].y
-        z = self.sign_dict[sign_num].z
-        yaw = self.sign_dict[sign_num].yaw
-        self.fly_to_pos(x, y, z, yaw)
-        return
-    
     def collect_photos(self):
-        while not rospy.is_shutdown():
-            if self.current_sign < 8:
-                if self.pic_num >= self.PICS_PER_SIGN:
-                    self.pic_num = 0
-                    self.current_sign += 1
-                    self.fly_to_sign(self.current_sign)
-                
-                print(f"Taking pictures at sign {self.current_sign}...")
-                self.fly_to_relative_pos(self.pic_num, self.sign_dict[self.current_sign])
-                rospy.sleep(0.25)
-                self.collect_photo(self.current_sign, self.pic_num)
-                self.pic_num += 1
+        for sign_idx in range(1,9):
+            if rospy.is_shutdown():
+                break
+            self.current_sign = sign_idx
+            if self.current_sign < 9:
+                # print(f"Flying to sign {self.current_sign}...")
+                self.fly_to_sign(self.current_sign)
+                rospy.sleep(0.5) # sleep to ensure drone is stable before taking photos
+                for p_idx in range(self.PICS_PER_SIGN):
+                    if rospy.is_shutdown():
+                        break
+                    self.pic_num = p_idx
+                    # print(f"Taking picture {self.pic_num} at sign {self.current_sign}...")
+                    self.fly_to_relative_pos(self.pic_num, self.sign_dict[self.current_sign])
+                    rospy.sleep(0.5)
+                    self.collect_photo(self.current_sign, self.pic_num)
         print("All pictures taken...")
         return
     
+    def fly_to_sign(self, sign_num):
+        x   = self.sign_dict[sign_num].x
+        y   = self.sign_dict[sign_num].y
+        z   = self.sign_dict[sign_num].z
+        yaw = self.sign_dict[sign_num].yaw
+        self.fly_to_pos(x, y, z, yaw)
+        return
     
     def fly_to_relative_pos(self, pos_num, home_pos):
         x, y, z, yaw = self.get_rel_pos(pos_num, home_pos)
@@ -188,8 +179,18 @@ class DronePicCollectNode:
         new_x = home_pos.x - rel_h * math.sin(yaw_rad)
         new_y = home_pos.y + rel_h * math.cos(yaw_rad)
         new_z = max(home_pos.z + rel_z, 0.01) # make sure to stay off ground
-        return  new_x, new_y, new_z, home_pos.yaw
-    
+        new_yaw = self.get_stop_yaw(new_x, new_y, self.abs_sign_dict[self.current_sign].x, self.abs_sign_dict[self.current_sign].y)
+        
+        return  new_x, new_y, new_z, new_yaw
+
+    def get_stop_yaw(self, stop_x, stop_y, sign_x, sign_y):
+        rel_y = (sign_y * 1000 - stop_y * 1000)
+        rel_x = (sign_x * 1000 - stop_x * 1000)
+        new_yaw = math.atan2(rel_y, rel_x)
+        # print(f"Relative x: {rel_x}, Relative y: {rel_y}, Yaw: {math.degrees(new_yaw)} degrees")
+        
+        return math.degrees(new_yaw)
+
     def collect_photo(self, sign_num, pic_num):
         ros_image = rospy.wait_for_message(self.camera_topic, Image, timeout=5)
         try:

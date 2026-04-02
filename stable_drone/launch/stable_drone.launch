@@ -1,0 +1,3 @@
+<launch>    
+	<node pkg="stable_drone" type="stable_drone.py" name="stabilizer" output="screen" />
+</launch>

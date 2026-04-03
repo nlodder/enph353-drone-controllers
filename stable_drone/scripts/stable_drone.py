@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from drone_desc.scripts.drone_cmd_bridge import DroneCmdBridge
 import rospy
 from geometry_msgs.msg import Wrench
 from sensor_msgs.msg import Imu
@@ -8,7 +7,8 @@ from gazebo_msgs.srv import ApplyBodyWrench
 class Stabilizer:
     def __init__(self):
         rospy.init_node('stabilizer')
-        self.UPDATE_HZ = 60
+        self.ns = rospy.get_namespace().strip('/')
+        self.UPDATE_HZ = 30
         self.P = 0.1
 
         # latch last command

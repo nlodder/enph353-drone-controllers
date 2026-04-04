@@ -1,0 +1,3 @@
+<launch>    
+	<node pkg="overseer_drone" type="overseer_drone.py" name="overseer" output="screen" />
+</launch>

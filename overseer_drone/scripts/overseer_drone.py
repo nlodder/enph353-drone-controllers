@@ -22,21 +22,22 @@ class OverseerDroneNode:
         self.abs_elev_target = 8 # desired absolute elevation target for oversight, adjust as needed
         self.altitude = 0.1 # current altitude of drone, updated from laser scan data
 
-        # state variable to track if drone is in position for oversight
         self.bridge = CvBridge()
         self.window_name = f"Overseer masked camera feed: {rospy.get_namespace()}"
 
         self.current_twist = Twist()
 
+        # INITIAL RISE OFF START
         self.state = "init_rise"
         self.centered = False
         self.INIT_RISE_TIME = 0.25 # seconds to rise up before switching to in position state
-        self.INIT_RISE_SPEED_Z = 0.9
-        self.INIT_RISE_SPEED_Y = 5.5
+        self.INIT_RISE_SPEED_Z = 1.1
+        self.INIT_RISE_SPEED_Y = 5.6
         self.INIT_RISE_SPEED_X = self.INIT_RISE_SPEED_Y * 5.5/2.5
 
-        self.x_pid = PIDController(kp=0.01, ki=0.0, kd=0.0)
-        self.y_pid = PIDController(kp=0.01, ki=0.0, kd=0.0)
+        # HORIZONTAL ALIGNMENT PID
+        self.x_pid = PIDController(kp=0.005, ki=0.0, kd=0.002)
+        self.y_pid = PIDController(kp=0.005, ki=0.0, kd=0.002)
         self.error_x = 0.0
         self.error_y = 0.0
         self.consecutive_centers = 0
@@ -70,8 +71,9 @@ class OverseerDroneNode:
                     cv.circle(edges_bgr, (cX, cY), 7, (0,255,0), -1)
                     M = cv.moments(largest_contour)
 
-                    self.error_x = cX - cv_image.shape[1]//2
-                    self.error_y = cY - cv_image.shape[0]//2
+                    # x axis of image is y-axis in world/drone frame anc vice-versa
+                    self.error_y = cv_image.shape[1]//2 - cX
+                    self.error_x = cv_image.shape[0]//2 - cY
 
                 cv.imshow(self.window_name, edges_bgr)
                 cv.waitKey(1)
@@ -81,6 +83,12 @@ class OverseerDroneNode:
         return
 
     def run(self):
+        """
+            Runs state machine for overseer
+            - state = init_rise  -> fly up and towards centre
+            - state = centering  -> altitude PID and xy PID, next state if centered for 1s
+            - state = commanding -> 
+        """
         rate = rospy.Rate(self.UPDATE_HZ)
         self.start_time = rospy.get_time()
         while not rospy.is_shutdown():
@@ -91,7 +99,7 @@ class OverseerDroneNode:
                 self.execute_centering()
 
             elif self.state == "commanding":
-                self.abs_elev_target = 7.8
+                self.abs_elev_target = 7.9
                 self.execute_centering()
 
             elif self.centered:
@@ -149,7 +157,7 @@ class OverseerDroneNode:
                 self.state = "commanding"
                 print("Drone is centered on world, commanding...")
         else:
-            self.consecutive_centres = 0
+            self.consecutive_centers = 0
             self.state = "centering"
         
         return
@@ -175,8 +183,6 @@ class PIDController:
         output = self.kp * error + self.ki * self.integral + self.kd * derivative
         self.previous_error = error
         return output
-
-
 
 def main():
     try:

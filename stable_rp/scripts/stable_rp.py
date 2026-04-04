@@ -42,8 +42,8 @@ class DroneRPStabilizer:
 
         # PD for angular stabilization
         # set to 0 for now...
-        self.current_wrench.torque.x = 0 # torque_roll
-        self.current_wrench.torque.y = 0 # torque_pitch
+        self.current_wrench.torque.x = torque_roll
+        self.current_wrench.torque.y = torque_pitch
         self.current_wrench.torque.z = 0  # No stabilization needed for yaw
         # self.show_pattern(quaternion, euler, error_roll, error_pitch)
 

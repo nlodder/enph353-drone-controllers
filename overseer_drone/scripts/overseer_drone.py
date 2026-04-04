@@ -59,17 +59,18 @@ class OverseerDroneNode:
                 edges_bgr = cv.cvtColor(edges, cv.COLOR_GRAY2BGR)
                 contours = cv.findContours(edges, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[0]
                 if len(contours) > 0:
-                    # display largest contour for debugging
-                    largest_contour = max(contours, key=cv.contourArea)
+                    # take convex hull of contours to overcome countour paths into centre of map (walls tied to roads etc.)
+                    hulls = []
+                    for contour in contours:
+                        hulls.append(cv.convexHull(contour))
+                        cv.drawContours(edges_bgr, [hulls[-1]], -1, (0,255,0), 3)
+                    largest_hull = max(hulls, key=cv.contourArea)
 
-                    # bounding box of whole map
-                    x, y, w, h = cv.boundingRect(largest_contour)
+                    x, y, w, h = cv.boundingRect(largest_hull)
                     cX = x + w // 2
                     cY = y + h // 2
-                    cv.drawContours(edges_bgr, [largest_contour], -1, (255,0,0), 3)
                     cv.rectangle(edges_bgr, (x, y), (x+w, y+h), (0,0,255), 2)
-                    cv.circle(edges_bgr, (cX, cY), 7, (0,255,0), -1)
-                    M = cv.moments(largest_contour)
+                    cv.circle(edges_bgr, (cX, cY), 7, (0,0,255), -1)
 
                     # x axis of image is y-axis in world/drone frame anc vice-versa
                     self.error_y = cv_image.shape[1]//2 - cX

@@ -16,8 +16,8 @@ class DroneRPStabilizer:
         rospy.init_node('drone_rp_stabilizer')
         
         # PID for angular stabilization
-        self.pitch_PID = StabilizePIDController(kp=0.7, ki=0.4, kd=0.2)
-        self.roll_PID = StabilizePIDController(kp=0.7, ki=0.4, kd=0.2)
+        self.pitch_PID = StabilizePIDController(kp=0.1, ki=0.0, kd=0.02)
+        self.roll_PID = StabilizePIDController(kp=0.1, ki=0.0, kd=0.02)
         self.target_euler = [0, 0] # target roll and pitch in radians
 
         self.UPDATE_HZ = 30
@@ -41,8 +41,9 @@ class DroneRPStabilizer:
         torque_pitch = self.pitch_PID.update(self.target_euler[1], pitch, 1.0 / self.UPDATE_HZ)
 
         # PD for angular stabilization
-        self.current_wrench.torque.x = torque_roll
-        self.current_wrench.torque.y = torque_pitch
+        # set to 0 for now...
+        self.current_wrench.torque.x = 0 # torque_roll
+        self.current_wrench.torque.y = 0 # torque_pitch
         self.current_wrench.torque.z = 0  # No stabilization needed for yaw
         # self.show_pattern(quaternion, euler, error_roll, error_pitch)
 

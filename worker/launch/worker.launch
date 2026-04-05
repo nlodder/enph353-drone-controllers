@@ -1,0 +1,5 @@
+<launch>    
+	<node pkg="worker" type="worker.py" name="worker" output="screen" />
+	<!-- node to direct twist messages to the drone to their planar and vertical handlers -->
+	<node pkg="worker" type="worker_cmd_bridge.py" name="worker_cmd_bridge" output="screen"/>
+</launch>

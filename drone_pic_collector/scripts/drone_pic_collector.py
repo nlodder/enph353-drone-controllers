@@ -61,9 +61,7 @@ class DronePicCollectNode:
         self.current_sign = 1
         self.pic_num = 0
 
-        self.camera_topic = "camera1/image_raw"
-
-        # self.image_sub = rospy.Subscriber("camera1/image_raw", Image, self.image_callback)
+        self.camera_topic = "camera_front/image_raw"
         self.cmd_vel_pub = rospy.Publisher("cmd_vel", Twist, queue_size=10)
 
         Pose = namedtuple('Pose', ['x', 'y', 'z', 'yaw'])
@@ -187,7 +185,6 @@ class DronePicCollectNode:
         rel_y = (sign_y * 1000 - stop_y * 1000)
         rel_x = (sign_x * 1000 - stop_x * 1000)
         new_yaw = math.atan2(rel_y, rel_x)
-        # print(f"Relative x: {rel_x}, Relative y: {rel_y}, Yaw: {math.degrees(new_yaw)} degrees")
         
         return math.degrees(new_yaw)
 

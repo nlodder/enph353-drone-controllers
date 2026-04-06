@@ -43,9 +43,9 @@ class DroneCmdBridge:
 
         # PID for altitude stabilization
         self.elev_PID = ElevPIDController(kp=2.3, ki=0.01, kd=1.2)
-        self.desired_z = 0.5 # desired altitude in meters
+        self.desired_z = 0.1 # desired altitude in meters
         self.current_z = 0.1 # current altitude in meters, updated from Gazebo
-        self.desired_abs_z = 0.5 # if set to a positive value, this will override desired_z and the drone will try to maintain this absolute altitude instead of adjusting based on cmd_vel vertical component
+        self.desired_abs_z = 0.1 # if set to a positive value, this will override desired_z and the drone will try to maintain this absolute altitude instead of adjusting based on cmd_vel vertical component
         
         self.UPDATE_HZ = 30
         self.DUR_BUFFER = rospy.Duration(1.5 / self.UPDATE_HZ) # force applied for update period

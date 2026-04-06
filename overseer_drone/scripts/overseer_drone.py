@@ -34,7 +34,7 @@ class OverseerDroneNode:
         self.alt_sub = rospy.Subscriber("altitude", Float64, self.alt_callback)    # get altitude data from depth cam
         self.abs_elev_pub = rospy.Publisher("abs_z_target", Float64, queue_size=1) # publish abs elev and overseer_cmd_bridge will maintain it
         self.abs_elev_target = 6 # desired absolute elevation target for oversight, adjust as needed
-        self.altitude = 6 # current altitude of drone, updated from laser scan data, initialized to 6 to prevent erratice behaviour
+        self.altitude = 6.1 # current altitude of drone, updated from laser scan data, initialized to 6.1 to prevent erratice behaviour
 
         self.bridge = CvBridge()
         self.window_name = f"Overseer masked camera feed: {rospy.get_namespace()}"
@@ -46,7 +46,7 @@ class OverseerDroneNode:
         self.state = "init_rise"
         self.INIT_RISE_TIME = 0.15 # seconds to rise up before switching to in position state
         self.INIT_RISE_SPEED_Z = 0.5
-        self.INIT_RISE_SPEED_Y = 4
+        self.INIT_RISE_SPEED_Y = 6
         self.INIT_RISE_SPEED_X = self.INIT_RISE_SPEED_Y * 5.0/2.5
 
         # HORIZONTAL ALIGNMENT PID

@@ -278,7 +278,7 @@ class WorkerDroneNode:
             Uses a neural network to read the sign in the image and return a confidence in the read and the predicted clue.
             For now, this is just a placeholder that returns random values. You can replace this with your actual neural network inference code.
         """
-        return 0.9, "THIS"
+        return 0.7, "THIS"
 
 class PIDController:
     """Simple PID controller for stabilizing in plane."""

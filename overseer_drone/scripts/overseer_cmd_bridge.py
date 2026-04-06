@@ -23,7 +23,7 @@ class DroneCmdBridge:
         rospy.Subscriber("cmd_vel", Twist, self.vel_callback)
         rospy.Subscriber("imu", Imu, self.imu_callback)
         rospy.Subscriber("altitude", Float64, self.altitude_callback)
-        rospy.Subscriber("rp_stabilizer_wrench", Wrench, self.rp_stabilizer_callback)
+        rospy.Subscriber("rpy_stabilizer_wrench", Wrench, self.rpy_stabilizer_callback)
         rospy.Subscriber("abs_z_target", Float64, self.abs_z_target_callback) # for receiving absolute altitude targets if desired  
         
         gravity = self.get_gazebo_gravity()
@@ -85,7 +85,7 @@ class DroneCmdBridge:
         self.current_z = msg.data
         return
 
-    def rp_stabilizer_callback(self, msg):
+    def rpy_stabilizer_callback(self, msg):
         """
             Updates the current wrench's torque components based on the incoming roll/pitch stabilization wrench message.
             - msg: geometry_msgs/Wrench message containing the torques needed for roll and pitch stabilization
@@ -94,6 +94,7 @@ class DroneCmdBridge:
         """
         self.current_wrench.torque.x = msg.torque.x
         self.current_wrench.torque.y = msg.torque.y
+        self.current_wrench.torque.z = msg.torque.z
         return
 
     def run(self):

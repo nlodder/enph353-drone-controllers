@@ -1,0 +1,3 @@
+<launch>    
+	<node pkg="stable_rpy" type="stable_rpy.py" name="drone_rpy_stabilizer" output="screen" />
+</launch>

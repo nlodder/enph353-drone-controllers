@@ -1,13 +1,13 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>stable_rp</name>
+  <name>stable_rpy</name>
   <version>0.0.0</version>
-  <description>The stable roll/pitch package</description>
+  <description>Package for drone roll, pitch, yaw stabilization</description>
 
   <!-- One maintainer tag required, multiple allowed, one person per tag -->
   <!-- Example:  -->
   <!-- <maintainer email="jane.doe@example.com">Jane Doe</maintainer> -->
-  <maintainer email="fizzer@todo.todo">fizzer</maintainer>
+  <maintainer email="nathan.lodder@proton.me">Nathan Lodder</maintainer>
 
 
   <!-- One license tag required, multiple allowed, one license per tag -->
@@ -19,7 +19,7 @@
   <!-- Url tags are optional, but multiple are allowed, one per tag -->
   <!-- Optional attribute type can be: website, bugtracker, or repository -->
   <!-- Example: -->
-  <!-- <url type="website">http://wiki.ros.org/stable_drone</url> -->
+  <!-- <url type="website">http://wiki.ros.org/stable_rpy</url> -->
 
 
   <!-- Author tags are optional, multiple are allowed, one per tag -->

@@ -1,6 +1,6 @@
 <launch>    
 	<arg name="pics_per_sign" default="20" />
-	<arg name="pics_data_path" default="=sign_pics/" />
+	<arg name="pics_data_path" default="sign_pics/" />
 	<arg name="ellipse_width" default="1.5"/>
 	<arg name="ellipse_height" default="1"/>
 	<arg name="distance_from_sign" default="0.5"/>

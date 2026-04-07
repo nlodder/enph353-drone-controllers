@@ -11,6 +11,7 @@ from tf.transformations import quaternion_from_euler
 import math
 from collections import namedtuple
 import monte_carlo_pack as mcp
+from std_msgs.msg import Float64
 import rospkg
 
 class DronePicCollectNode:
@@ -24,10 +25,10 @@ class DronePicCollectNode:
 
         # get constructor args from ROS param service
         raw_path = rospy.get_param('~data_path', "sign_pics")
-        self.PICS_PER_SIGN = rospy.get_param('~pics_per_sign', 20)
-        self.ELLIPSE_W = rospy.get_param('~ellipse_width', 1.5)
-        self.ELLIPSE_H = rospy.get_param('~ellipse_height', 1)
-        self.PERP_DIST_FROM_SIGN = rospy.get_param('~distance_from_sign', 0.5)
+        self.PICS_PER_SIGN = int(rospy.get_param('~pics_per_sign', 20))
+        self.ELLIPSE_W = float(rospy.get_param('~ellipse_width', 1.5))
+        self.ELLIPSE_H = float(rospy.get_param('~ellipse_height', 1))
+        self.PERP_DIST_FROM_SIGN = float(rospy.get_param('~distance_from_sign', 0.5))
 
         # get package path using Roses package management
         rospack = rospkg.RosPack()
@@ -60,11 +61,10 @@ class DronePicCollectNode:
         self.take_pic = False
         self.current_sign = 1
         self.pic_num = 0
+        self.current_image = None
 
-        self.camera_topic = "camera1/image_raw"
-
-        # self.image_sub = rospy.Subscriber("camera1/image_raw", Image, self.image_callback)
-        self.cmd_vel_pub = rospy.Publisher("cmd_vel", Twist, queue_size=10)
+        self.pic_sub = rospy.Subscriber("camera_front/image_raw", Image, self.img_callback)
+        self.elev_pub = rospy.Publisher("abs_z_target", Float64, queue_size=1)
 
         Pose = namedtuple('Pose', ['x', 'y', 'z', 'yaw'])
 
@@ -87,15 +87,19 @@ class DronePicCollectNode:
             yaw_rad = math.radians(old_pose.yaw)
             offset_x = old_pose.x - self.PERP_DIST_FROM_SIGN * math.cos(yaw_rad)
             offset_y = old_pose.y - self.PERP_DIST_FROM_SIGN * math.sin(yaw_rad)
-
             self.sign_dict[i] = Pose(offset_x, offset_y, old_pose.z, old_pose.yaw)
         
         rospy.sleep(1.0) # sleep for 1s to let nodes initialize
         
+        self.elev_pub.publish(0.2) # while we wait for monte carlo pack algo
         # GENERATE RELATIVE COORDINATES FOR EACH PHOTO AT EACH SIGN
         self.mcp = mcp.MonteCarloPack()
         # generates list of horizontal and z coordinates for robot to position at for each photo
         self.stops = self.mcp.get_point_list(self.ELLIPSE_W, self.ELLIPSE_H, self.PICS_PER_SIGN, 15)
+    
+    def img_callback(self, msg):
+        self.take_pic = False # toggle so that image is captured by collect_photo
+        self.current_image = msg
     
     def fly_to_pos(self, x, y, z, yaw):
         """
@@ -132,7 +136,10 @@ class DronePicCollectNode:
                 state.twist.angular.z = 0
 
                 state.reference_frame = "world"
-
+                if self.current_sign == 8:
+                    self.elev_pub.publish(z - 1.82)
+                else:
+                    self.elev_pub.publish(z) # so that command bridge doesn't try move it in elevation stabilization
                 response = apply_state(state)
             except rospy.ServiceException as e:
                 print(f"Service call failed: {e}")
@@ -178,6 +185,10 @@ class DronePicCollectNode:
 
         new_x = home_pos.x - rel_h * math.sin(yaw_rad)
         new_y = home_pos.y + rel_h * math.cos(yaw_rad)
+        # make sure x and y are inside world bounds
+        new_x = max(-5.8, min(5.8, new_x))
+        new_y = max(-2.55, min(2.55, new_y))
+
         new_z = max(home_pos.z + rel_z, 0.01) # make sure to stay off ground
         new_yaw = self.get_stop_yaw(new_x, new_y, self.abs_sign_dict[self.current_sign].x, self.abs_sign_dict[self.current_sign].y)
         
@@ -187,15 +198,19 @@ class DronePicCollectNode:
         rel_y = (sign_y * 1000 - stop_y * 1000)
         rel_x = (sign_x * 1000 - stop_x * 1000)
         new_yaw = math.atan2(rel_y, rel_x)
-        # print(f"Relative x: {rel_x}, Relative y: {rel_y}, Yaw: {math.degrees(new_yaw)} degrees")
         
         return math.degrees(new_yaw)
 
     def collect_photo(self, sign_num, pic_num):
-        ros_image = rospy.wait_for_message(self.camera_topic, Image, timeout=5)
+        # image callback will toggle self.take_pic when new image arrives
+        self.take_pic = True
+        self.current_image = None
+        while self.take_pic and not rospy.is_shutdown():
+            rospy.sleep(0.01)
+        # now we have fresh image
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(ros_image, "bgr8")
-            suffix = "{:04d}".format(pic_num)
+            cv_image = self.bridge.imgmsg_to_cv2(self.current_image, "bgr8")
+            suffix = "{:03d}".format(pic_num)
             cv.imwrite(os.path.join(self.DATA_PATH, f"sign{sign_num}_{suffix}.png"), cv_image)
         except CvBridgeError as e:
             rospy.logerr(f"CvBridge Error: {e}")

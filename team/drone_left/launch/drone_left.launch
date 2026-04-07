@@ -1,5 +1,5 @@
 <launch>    
-	<node pkg="drone_time_trials" type="drone_time_trials.py" name="drone_time_trials" output="screen" />
+	<node pkg="drone_left" type="drone_left.py" name="drone_left" output="screen" />
 	<!-- node to direct twist messages to the drone to their planar and vertical handlers -->
 	<node pkg="drone_desc" type="drone_cmd_bridge.py" name="drone_cmd_bridge" output="screen"/>
 </launch>

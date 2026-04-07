@@ -56,8 +56,8 @@ class TeamLeftDroneNode:
 
         self.abs_elev_pub = rospy.Publisher("abs_z_target", Float64, queue_size=1) # publish absolute elevation target for cmd bridge to maintain for oversight
         self.alt_sub = rospy.Subscriber("altitude", Float64, self.alt_callback)
-        self.abs_elev_target = 0.3 # desired absolute elevation target for oversight, adjust as needed
-        self.altitude = 0.3 # current altitude of drone, updated from laser scan data
+        self.abs_elev_target = 0.5 # desired absolute elevation target for oversight, adjust as needed
+        self.altitude = None # current altitude of drone, updated from laser scan data
 
         self.bridge = CvBridge()
         self.window_name = f"{rospy.get_namespace()} camera feed"
@@ -66,10 +66,14 @@ class TeamLeftDroneNode:
         self.current_twist = Twist()
 
         # HORIZONTAL ALIGNMENT PID
-        self.x_pid = PIDController(kp=0.005, ki=0.0, kd=0.001)
-        self.y_pid = PIDController(kp=0.005, ki=0.0, kd=0.001)
+        self.x_pid = PIDController(kp=0.004, ki=0.0, kd=0.008)
+        self.y_pid = PIDController(kp=0.004, ki=0.0, kd=0.008)
         self.error_x = 0.0
         self.error_y = 0.0
+
+        # HSV RANGE FOR SIGN COLORS
+        self.LOWER_BLUE = (100, 150, 50)
+        self.UPPER_BLUE = (140, 255, 255)
 
         # -- SETUP UNIQUE TO TEAM MEMBER --
         # PERSISTANT VARIABLES
@@ -89,10 +93,10 @@ class TeamLeftDroneNode:
 
         # FOR WHICH DIRECTION DRONE NEEDS TO 'KICK OFF' WHEN LEAVING A SIGN
         self.kickoff_movements = {
-            1: SignMovements(  0, -1),
-            2: SignMovements( -1, -1),
-            3: SignMovements( -1,  1),
-            4: SignMovements(  0,  0)
+            1: SignMovements( -0.2, -1),
+            2: SignMovements(   -1, -1),
+            3: SignMovements(   -1,  1),
+            4: SignMovements(    0,  0)
         }
 
         # FOR TRACKING WHICH CAMERA THE DRONE SHOULD BE USING
@@ -136,9 +140,19 @@ class TeamLeftDroneNode:
         return
 
     def image_callback(self, data):
-        """Updates self.current_image with image converted to cv2 format"""
+        """Updates self.current_image with image converted to cv2 bgr8 format"""
         self.current_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         return
+    
+    def is_initialized(self):
+        """
+            Returns true if messages have been recieved from node dependencies:
+            - cameras
+            - depth sensor
+        """
+        if self.altitude is None: return False
+        if self.current_image is None: return False
+        return True
 
     def run(self):
         """
@@ -152,6 +166,12 @@ class TeamLeftDroneNode:
                                    if they are done, publish to score tracker
         """
         rate = rospy.Rate(self.UPDATE_HZ)
+        
+        # wait until sensor comms established
+        while not rospy.is_shutdown() and not self.is_initialized():
+            rospy.loginfo_once("Waiting for sensor data (altitude/images)...")
+            rate.sleep()
+        
         # get us to target elevation for main phase
         self.abs_elev_pub.publish(self.abs_elev_target)
         
@@ -333,9 +353,7 @@ class TeamLeftDroneNode:
         try:
             hsv_image = cv.cvtColor(cv_image, cv.COLOR_BGR2HSV)
             # filter for a range around common 'blue'
-            lower_blue = (100, 150, 50)
-            upper_blue = (140, 255, 255)
-            mask = cv.inRange(hsv_image, lower_blue, upper_blue)
+            mask = cv.inRange(hsv_image, self.LOWER_BLUE, self.UPPER_BLUE)
 
             # this should close any 'broken' edges...
             kernel = np.ones((20, 20), np.uint8)
@@ -367,7 +385,7 @@ class TeamLeftDroneNode:
                     goal_ratio_sqrt = np.sqrt(GOAL_AREA_RATIO_APPROACH)                    
 
                 # pass linearize values to modify the xy errors
-                self.modify_errors(cXY, cZ, image_width, image_height, current_ratio_sqrt, goal_ratio_sqrt)
+                self.modify_errors(cXY, image_width, image_height, current_ratio_sqrt, goal_ratio_sqrt)
 
                 cv.circle(cv_image, (cXY, cZ), 7, (0,0,255), -1)
 
@@ -383,7 +401,7 @@ class TeamLeftDroneNode:
             rospy.logerr(f"CvBridge Error: {e}")
         return sign_readable
 
-    def modify_errors(self, cXY, cZ, img_w, img_h, current_ratio_sqrt, goal_ratio_sqrt):
+    def modify_errors(self, cXY, img_w, img_h, current_ratio_sqrt, goal_ratio_sqrt):
         """
             Modifies the self.error_x and self.error_y based on the position of the sign centroid and current camera in use
             - cXY is the horizontal coordinate of the centroid of the detected sign border contour

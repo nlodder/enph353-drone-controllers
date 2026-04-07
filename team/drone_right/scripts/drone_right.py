@@ -56,8 +56,8 @@ class TeamRightDroneNode:
 
         self.abs_elev_pub = rospy.Publisher("abs_z_target", Float64, queue_size=1) # publish absolute elevation target for cmd bridge to maintain for oversight
         self.alt_sub = rospy.Subscriber("altitude", Float64, self.alt_callback)
-        self.abs_elev_target = 0.3 # desired absolute elevation target for oversight, adjust as needed
-        self.altitude = 0.3 # current altitude of drone, updated from laser scan data
+        self.abs_elev_target = 0.5 # desired absolute elevation target for oversight, adjust as needed
+        self.altitude = None # current altitude of drone, updated from laser scan data
 
         self.bridge = CvBridge()
         self.window_name = f"{rospy.get_namespace()} camera feed"
@@ -66,10 +66,14 @@ class TeamRightDroneNode:
         self.current_twist = Twist()
 
         # HORIZONTAL ALIGNMENT PID
-        self.x_pid = PIDController(kp=0.005, ki=0.0, kd=0.001)
-        self.y_pid = PIDController(kp=0.005, ki=0.0, kd=0.001)
+        self.x_pid = PIDController(kp=0.004, ki=0.0, kd=0.008)
+        self.y_pid = PIDController(kp=0.004, ki=0.0, kd=0.008)
         self.error_x = 0.0
         self.error_y = 0.0
+
+        # HSV RANGE FOR SIGN COLORS
+        self.LOWER_BLUE = (100, 150, 50)
+        self.UPPER_BLUE = (140, 255, 255)
 
         # -- SETUP UNIQUE TO TEAM MEMBER
         # PERSISTANT VARIABLES
@@ -135,9 +139,19 @@ class TeamRightDroneNode:
         return
 
     def image_callback(self, data):
-        """Updates self.current_image with image converted to cv2 format"""
+        """Updates self.current_image with image converted to cv2 bgr8 format"""
         self.current_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         return
+
+    def is_initialized(self):
+        """
+            Returns true if messages have been recieved from node dependencies:
+            - cameras
+            - depth sensor
+        """
+        if self.altitude is None: return False
+        if self.current_image is None: return False
+        return True
     
     def run(self):
         """
@@ -151,6 +165,12 @@ class TeamRightDroneNode:
                                    if they are done, publish to score tracker
         """
         rate = rospy.Rate(self.UPDATE_HZ)
+
+        # wait until sensor comms established
+        while not rospy.is_shutdown() and not self.is_initialized():
+            rospy.loginfo_once("Waiting for sensor data (altitude/images)...")
+            rate.sleep()
+        
         # get us to target elevation for main phase
         self.abs_elev_pub.publish(self.abs_elev_target)
         
@@ -185,7 +205,6 @@ class TeamRightDroneNode:
             if self.altitude >= self.abs_elev_target:
                 self.state = self.KICKOFF_STATE
             return
-            
 
         elif self.current_sign > self.LAST_SIGN_NUM:
             self.state = self.FINISHED_STATE
@@ -284,10 +303,13 @@ class TeamRightDroneNode:
         if self.current_image is None:
             return
         cv_image = self.current_image
-        sign_readable = self.sign_readable(cv_image)    
+        sign_readable = self.sign_readable(cv_image)
         
-        if self.state == self.LOOKING_STATE and sign_readable:
-            self.ready_to_approach = True
+        if self.state == self.LOOKING_STATE:
+            if self.sign_located(cv_image):
+                self.ready_to_approach = True
+            else:
+                return # so we don't waste time on remaining conditionals
 
         elif self.state == self.APPROACH_STATE and sign_readable:
             self.ready_to_set = True
@@ -313,6 +335,60 @@ class TeamRightDroneNode:
         """
         return True, "THIS"
     
+    def sign_located(self, cv_image):
+        """
+        - Returns true if a sign was located in the image
+        - modifies self.error_x and self.error_y if sign located through calling
+          self.modify_errors
+        - looks first in lower 2/3 before analyzing full img to keep it light
+        """
+        # chop image down to see if we can find a sign in the lower 2/3 and save compute
+        image_width = cv_image.shape[1]
+        image_height = cv_image.shape[0]
+
+        # try smaller img size
+        roi = cv_image[ int(image_height*1/3) : , :]
+        # process smaller image
+        try:
+            sorted_contours = None
+
+            # ROI attempt
+            roi_hsv = cv.cvtColor(roi, cv.COLOR_BGR2HSV)
+            contours = self.blue_contours(roi_hsv)
+
+            if not contours:
+                hsv_img = cv.cvtColor(cv_image, cv.COLOR_BGR2HSV)
+                contours = self.blue_contours(hsv_img)
+
+            if not contours:
+                return False
+            
+            # grab the top 4 contours based on area
+            sorted_contours = sorted(contours, key=cv.contourArea, reverse=True)
+            top_x = min(len(sorted_contours), 4)
+            top_contours = sorted_contours[ : top_x]
+
+            # find the closest sign based on how close to bottom of img its bottom edge is
+            closest_sign = None
+            max_y = -1
+            for cnt in top_contours:
+                x, y, w, h = cv.boundingRect(cnt)
+                bottom_y = y + h # The bottom edge of the sign
+
+                if bottom_y > max_y:
+                    max_y = bottom_y
+                    closest_sign = (x,y,w,h)
+            
+            bx, by, bw, bh = closest_sign
+            cXY = bx + bw//2
+            # now adjust errors for PID based on the closest sign
+            self.modify_errors(cXY, image_width, image_height, bh, 0.05)
+        
+        except CvBridgeError as e:
+            rospy.logerr(f"CvBridge Error: {e}")
+
+        return True
+    
     def sign_readable(self, cv_image):
         """
         Masks image for the blue color of the sign. If the sign is fully in frame and also large enough,
@@ -324,64 +400,56 @@ class TeamRightDroneNode:
         """
         THRSHOLD_LOWER = 1000
         THRSHOLD_UPPER = 50000
-        GOAL_AREA_RATIO = 0.05 
-        GOAL_AREA_RATIO_APPROACH = 0.005
+
+        GOAL_HEIGHT_RATIO = 0.05 
+        GOAL_HEIGHT_RATIO_APPROACH = 0.005
+
         CENTER_TOLERANCE = 50
-        sign_readable = False
+        is_readable = False
+
         try:
-            hsv_image = cv.cvtColor(cv_image, cv.COLOR_BGR2HSV)
-            # filter for a range around common 'blue'
-            lower_blue = (100, 150, 50)
-            upper_blue = (140, 255, 255)
-            mask = cv.inRange(hsv_image, lower_blue, upper_blue)
-
-            # this should close any 'broken' edges...
-            kernel = np.ones((20, 20), np.uint8)
-            solid_mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel)
-
-            contours = cv.findContours(solid_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[0]
+            contours = self.blue_contours(cv_image)
             
             if len(contours) > 0:
                 # take convex hull of contours to overcome countour paths into centre of map (walls tied to roads etc.)
                 largest_contour = max(contours, key=cv.contourArea)
-                hull = cv.convexHull(largest_contour) # smoothing edges
-                cv.drawContours(cv_image, [hull], -1, (0,0,255), 2)
+                x, y, w, h = cv.boundingRect(largest_contour)
+                # hull = cv.convexHull(largest_contour) # smoothing edges
+                cv.rectangle(cv_image, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                cv.drawContours(cv_image, contours, -1, (0,255,0), 2)
 
-                area = cv.contourArea(hull)
-                M = cv.moments(hull)
-                if M["m00"] == 0: return False
-                # horizontal and vertical coordinates of centroid.
-                cXY = int(M["m10"] / M["m00"])
-                cZ = int(M["m01"] / M["m00"])
+                cXY = x + w//2
+                cZ = y + h//2
+
                 image_width = cv_image.shape[1]
                 image_height = cv_image.shape[0]
 
-                # calculate linearized area ratio
-                # use sqrt to get into pixel-width units                
-                area_ratio = area / (image_width * image_height)
-                current_ratio_sqrt = np.sqrt(area_ratio)
-                goal_ratio_sqrt = np.sqrt(GOAL_AREA_RATIO)
+                goal_ratio = GOAL_HEIGHT_RATIO
+            
                 if self.state == self.LOOKING_STATE or self.state==self.APPROACH_STATE:
-                    goal_ratio_sqrt = np.sqrt(GOAL_AREA_RATIO_APPROACH)                    
+                    goal_ratio = GOAL_HEIGHT_RATIO_APPROACH                  
 
                 # pass linearize values to modify the xy errors
-                self.modify_errors(cXY, cZ, image_width, image_height, current_ratio_sqrt, goal_ratio_sqrt)
+                self.modify_errors(cXY, image_width, image_height, h, GOAL_HEIGHT_RATIO)
 
-                cv.circle(cv_image, (cXY, cZ), 7, (0,0,255), -1)
+                cv.circle(cv_image, (cXY, cZ), 7, (0,255,0), -1)
 
-                # check if contour area is within thresholds and centroid is near center of image
-                # don't worryabout centering in height, only in xy
-                if THRSHOLD_LOWER < area < THRSHOLD_UPPER and abs(cXY - image_width//2) < CENTER_TOLERANCE:
-                    sign_readable = True
+                area = cv.contourArea(largest_contour)
+                is_centered = abs(cXY - image_width//2) < CENTER_TOLERANCE
+                is_sized = THRSHOLD_LOWER < area < THRSHOLD_UPPER
+
+                if is_centered and is_sized:
+                    is_readable = True
                 
             cv.imshow(self.window_name, cv_image)
             cv.waitKey(1)
             
         except CvBridgeError as e:
             rospy.logerr(f"CvBridge Error: {e}")
-        return sign_readable
+            
+        return is_readable
 
-    def modify_errors(self, cXY, cZ, img_w, img_h, current_ratio_sqrt, goal_ratio_sqrt):
+    def modify_errors(self, cXY, img_w, img_h, sign_height, goal_height_ratio=0.2):
         """
             Modifies the self.error_x and self.error_y based on the position of the sign centroid and current camera in use
             - cXY is the horizontal coordinate of the centroid of the detected sign border contour
@@ -390,7 +458,8 @@ class TeamRightDroneNode:
         # positive if target left, negative if target right
         centroid_error = (img_w//2) - cXY
         # positive if target far, negative if target close
-        depth_error = (goal_ratio_sqrt - current_ratio_sqrt) * img_w
+        current_ratio = sign_height / img_h
+        depth_error = (goal_height_ratio - current_ratio) * img_w
         
         if self.current_cam == "right":
             # camera looks at +Y, centroid error moves drone on X, depth error moves drone on Y
@@ -413,6 +482,25 @@ class TeamRightDroneNode:
             self.error_y = -centroid_error
     
         return
+
+    def blue_contours(self, bgr_image):
+        """
+        Returns a contours of the the blues in range [self.LOWER_BLUE, self.UPPER_BLUE]
+        - pass as argument a bgr8 image
+        """
+        try:
+            hsv_image = cv.cvtColor(bgr_image, cv.COLOR_BGR2HSV)
+            # filter for a range around common 'blue'
+            mask = cv.inRange(hsv_image, self.LOWER_BLUE, self.UPPER_BLUE)
+            # this should close any 'broken' edges...
+            kernel = np.ones((20, 20), np.uint8)
+            solid_mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel)
+            contours = cv.findContours(solid_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[0]
+        
+        except CvBridgeError as e:
+            rospy.logerr(f"CvBridge Error: {e}")
+
+        return contours if contours else []
     
     def make_state_msg(self):
         # Map integer states to readable strings

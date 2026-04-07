@@ -39,6 +39,13 @@ class TeamLeftDroneNode:
         self.front_image_sub = rospy.Subscriber("camera_front/image_raw", Image, self.imageF_callback)
         self.back_image_sub = rospy.Subscriber("camera_back/image_raw", Image, self.imageB_callback)
 
+        # FOR NEURAL NET ANALYSIS
+        self.nn_query_pub = rospy.Publisher("nn_query", Image, queue_size=1)
+        self.nn_resp_sub = rospy.Subscriber("nn_resp", String, self.nn_resp_callback)
+        self.nn_response = None
+        self.nn_query_sent = False
+        self.nn_resp_recieved = False
+        
         self.vel_pub = rospy.Publisher("cmd_vel", Twist, queue_size=1) # cmd_vel for cmd_bridge node to apply as wrenches
         self.score_pub = rospy.Publisher("/score_tracker", String, queue_size=10)
         self.state_pub = rospy.Publisher("state", String, queue_size = 10)
@@ -56,7 +63,7 @@ class TeamLeftDroneNode:
 
         self.abs_elev_pub = rospy.Publisher("abs_z_target", Float64, queue_size=1) # publish absolute elevation target for cmd bridge to maintain for oversight
         self.alt_sub = rospy.Subscriber("altitude", Float64, self.alt_callback)
-        self.abs_elev_target = 0.5 # desired absolute elevation target for oversight, adjust as needed
+        self.abs_elev_target = 0.3 # desired absolute elevation target for oversight, adjust as needed
         self.altitude = None # current altitude of drone, updated from laser scan data
 
         self.bridge = CvBridge()
@@ -77,7 +84,7 @@ class TeamLeftDroneNode:
 
         # -- SETUP UNIQUE TO TEAM MEMBER --
         # PERSISTANT VARIABLES
-        self.state = self.ELEVATING
+        self.state = self.QUERY_STATE
         self.current_cam = "right" # which cam feed we are currently using for image processing.
         self.current_sign = 1
         self.LAST_SIGN_NUM = 4 # all the signs this drone is responsible for inclusive
@@ -144,6 +151,12 @@ class TeamLeftDroneNode:
         self.current_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         return
     
+    def nn_resp_callback(self,data):
+        "sets self.nn_resp_recieved to True and populates self.nn_response with msg"
+        self.nn_response = data
+        self.nn_resp_recieved = True
+        return
+    
     def is_initialized(self):
         """
             Returns true if messages have been recieved from node dependencies:
@@ -169,6 +182,7 @@ class TeamLeftDroneNode:
         
         # wait until sensor comms established
         while not rospy.is_shutdown() and not self.is_initialized():
+            self.state_pub.publish(state_msg)
             rospy.loginfo_once("Waiting for sensor data (altitude/images)...")
             rate.sleep()
         
@@ -186,6 +200,7 @@ class TeamLeftDroneNode:
             self.update_state()
             
             # update command bridge with movement demands
+            self.abs_elev_pub.publish(self.abs_elev_target)
             self.vel_pub.publish(self.current_twist)
             state_msg = self.make_state_msg()
             self.state_pub.publish(state_msg)
@@ -205,6 +220,7 @@ class TeamLeftDroneNode:
         if self.state == self.ELEVATING:
             if self.altitude >= self.abs_elev_target:
                 self.state = self.QUERY_STATE
+                self.abs_elev_target = 0.5
             return
 
         elif self.current_sign > self.LAST_SIGN_NUM:
@@ -317,16 +333,52 @@ class TeamLeftDroneNode:
         elif self.state == self.SETTING_STATE and sign_readable:
             self.ready_to_query = True
 
-        elif self.state == self.QUERY_STATE and sign_readable:
-            # TODO: MAKE THIS COMMUNICATION WITH NN ROSTOPIC
-            read_good, clue_prediction = self.read_sign(cv_image)
-            if read_good:
-                self.score_pub.publish(f"{self.TEAM_NAME},{self.TEAM_PASS},{self.current_sign},{clue_prediction}")
-                self.ready_to_kickoff = True
-            else:
+        elif self.state == self.QUERY_STATE:
+            if self.nn_query_sent:
+                if self.nn_resp_recieved:
+                    self.handle_nn_response()
+                    self.nn_query_sent = False
+
+            elif sign_readable:
+                # publish image for analysis
+                ros_image = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
+                self.nn_query_pub.publish(ros_image)
+                self.nn_query_sent = True
                 self.ready_to_kickoff = False
+
+            self.nn_resp_recieved = False
         
         return
+    
+    def handle_nn_response(self):
+        """
+        Parses nueral net response string to determine whether its analysis
+        was successful. If successful
+        - publishes to score tracker
+        - sets ready_to_kickoff flag to True
+        If unsuccessful
+        - sets ready_to_kickoff to False
+        """
+        # check if we were successful
+        success, clue = self.parse_nn_response()
+        if success:
+            self.score_pub.publish(f"{self.TEAM_NAME},{self.TEAM_PASS},{self.current_sign},{clue}")
+            self.ready_to_kickoff = True
+        else:
+            self.ready_to_kickoff = False
+
+    def parse_nn_response(self):
+        """
+        Parses neural net response string assuming format: "TRUE,CLUE" or "FALSE,CLUE"
+        and
+        - returns True/False, "CLUE"
+        """
+        data = self.nn_response
+        success, clue = data.split(",")
+        if success == "TRUE":
+            return True, clue
+        else:
+            return False, clue
     
     def read_sign(self, cv_image):
         """

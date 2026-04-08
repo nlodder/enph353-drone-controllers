@@ -86,13 +86,13 @@ class StabilizePIDController:
     
     def update(self, target_rad, current_rad, dt, current_velocity=None):
         error = target_rad - current_rad
-        # Normalize error [-pi, pi]
+        # normalize error [-pi, pi]
         error = math.atan2(math.sin(error), math.cos(error))
         
-        # Integral term
+        # integral term
         self.integral += error * dt
         
-        # Derivative term: Use IMU velocity if provided, otherwise calculate
+        # derivative term: Use IMU velocity if provided, otherwise calculate
         if current_velocity is not None:
             # We use negative velocity because the derivative of error (0 - current) 
             # is -velocity. This provides the damping.
@@ -102,36 +102,7 @@ class StabilizePIDController:
 
         output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
         
-        # Keep your state updated!
-        self.previous_error = error
-        return output
-
-class StabilizePIDControllerOld:
-    """
-        Simple PID controller for stabilizing roll, pitch, and yaw angles
-    """
-    def __init__(self, kp, ki, kd):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.previous_error = 0
-        self.integral = 0
-    
-    def update(self, target_rad, current_rad, dt):
-        """
-        Simple PID controller to stabilize the drone's orientation.
-         - target_rad: desired angle in radians (roll, pitch, or yaw)
-         - current_rad: current angle in radians (roll, pitch, or yaw)
-         - dt: time step in seconds
-         Returns the control output (torque) to apply.
-        """
-        # if the roll/pitch is positive, apply negative torque to stabilize, and vice versa
-        error = target_rad - current_rad
-        # normalize error to be within [-pi, pi]
-        error = math.atan2(math.sin(error), math.cos(error))
-        self.integral += error * dt
-        derivative = (error - self.previous_error) / dt if dt > 0 else 0
-        output = self.kp * error + self.ki * self.integral + self.kd * derivative
+        # keep state updated
         self.previous_error = error
         return output
 

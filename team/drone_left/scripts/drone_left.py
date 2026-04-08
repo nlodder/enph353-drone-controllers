@@ -182,6 +182,7 @@ class TeamLeftDroneNode:
         
         # wait until sensor comms established
         while not rospy.is_shutdown() and not self.is_initialized():
+            state_msg = self.make_state_msg()
             self.state_pub.publish(state_msg)
             rospy.loginfo_once("Waiting for sensor data (altitude/images)...")
             rate.sleep()
@@ -373,7 +374,7 @@ class TeamLeftDroneNode:
         and
         - returns True/False, "CLUE"
         """
-        data = self.nn_response
+        data = self.nn_response.data
         success, clue = data.split(",")
         if success == "TRUE":
             return True, clue

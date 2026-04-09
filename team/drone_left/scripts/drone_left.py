@@ -16,11 +16,16 @@ class TeamLeftDroneNode:
         self.UPDATE_HZ = 30
 
         # STATE CONSTANTS
+        self.START = 0
         self.APPROACH_STATE = 1
         self.QUERY_STATE = 2
         self.KICKOFF_STATE = 3
         self.FINISHED_STATE = 4
         self.ELEVATING = 5
+
+        self.start_timer = 0
+        self.START_CYCLES = 2000
+        self.started = False
 
         # STATE CHANGE FLAGS
         self.ready_to_approach = False
@@ -30,26 +35,26 @@ class TeamLeftDroneNode:
         self.ready_to_look = False
 
         self.kickoff_timer = 0
-        self.KICKOFF_CYCLES = 20
+        self.KICKOFF_CYCLES = 10
+        self.KO_REC_CYCLES = 40
+        self.ko_rec_timer = 0
+        self.ko_rec_complete = False
 
         self.front_image_sub = rospy.Subscriber("camera_front/image_raw", Image, self.imageF_callback)
         self.back_image_sub = rospy.Subscriber("camera_down/image_raw", Image, self.imageD_callback)
 
         # FOR NEURAL NET ANALYSIS
         # handshake
-        self.nn_hsk = False
-        self.nn_hsk_pub = rospy.Publisher("nn_hsk_ack", String, queue_size=10)
-        self.nn_hsk_sub = rospy.Subscriber("nn_hsk", String, self.nn_hsk_callback)
+        # self.nn_hsk = False
+        # self.nn_hsk_pub = rospy.Publisher("nn_hsk_ack", String, queue_size=10)
+        # self.nn_hsk_sub = rospy.Subscriber("nn_hsk", String, self.nn_hsk_callback)
 
-        # analysis
-        self.nn_query_pub = rospy.Publisher("nn_query", Image, queue_size=1)
-        self.nn_resp_sub = rospy.Subscriber("nn_resp", String, self.nn_resp_callback)
-        self.nn_response = None
-        self.nn_query_sent = False
-        self.nn_resp_recieved = False
+        # CHECKING IF NN GOT READ
+        self.nn_resp_received = False
         
         self.vel_pub = rospy.Publisher("cmd_vel", Twist, queue_size=1) # cmd_vel for cmd_bridge node to apply as wrenches
         self.score_pub = rospy.Publisher("/score_tracker", String, queue_size=10)
+        self.score_sub = rospy.Subscriber("/score_tracker", String, self.score_tracker_callback)
         self.state_pub = rospy.Publisher("state", String, queue_size = 10)
 
         # COORDINATION WITH OVERSEER
@@ -65,7 +70,7 @@ class TeamLeftDroneNode:
 
         self.abs_elev_pub = rospy.Publisher("abs_z_target", Float64, queue_size=1) # publish absolute elevation target for cmd bridge to maintain for oversight
         self.alt_sub = rospy.Subscriber("altitude", Float64, self.alt_callback)
-        self.abs_elev_target = 0.3 # desired absolute elevation target for before starting line following PID
+        self.abs_elev_target = 0 # desired absolute elevation target for before starting line following PID
         self.altitude = None # current altitude of drone, updated from laser scan data
 
         self.bridge = CvBridge()
@@ -76,12 +81,18 @@ class TeamLeftDroneNode:
         self.current_twist = Twist()
 
         # HORIZONTAL ALIGNMENT PID
-        self.x_pid = PIDController(kp=0.004, ki=0.0, kd=0.008)
-        self.y_pid = PIDController(kp=0.5, ki=0.001, kd=0.2)
-        self.z_pid = PIDController(kp=0.1, ki=0.0, kd=0.001)
+        self.x_pid = PIDController(kp=1, ki=0.001, kd=1)
+        self.y_pid = PIDController(kp=4, ki=0.001, kd=1)
+        self.z_pid = PIDController(kp=4, ki=0.0, kd=0.01)
         self.error_x = 0.0
         self.error_y = 0.0
         self.error_ang_z = 0.0
+        self.x_pid.previous_error=0
+        self.y_pid.previous_error=0
+        self.z_pid.previous_error=0
+        self.x_pid.integral=0
+        self.y_pid.integral=0
+        self.z_pid.integral=0
 
         # HSV RANGE FOR SIGN COLORS
         self.LOWER_BLUE = (100, 150, 50)
@@ -89,15 +100,15 @@ class TeamLeftDroneNode:
 
         # -- SETUP UNIQUE TO TEAM MEMBER --
         # PERSISTANT VARIABLES
-        self.state = self.QUERY_STATE
+        self.state = self.START
         self.current_cam = "front" # which cam feed we are currently using for image processing.
         self.current_sign = 1
-        self.LAST_SIGN_NUM = 6 # all the signs this drone is responsible for inclusive
+        self.LAST_SIGN_NUM = 1 # all the signs this drone is responsible for inclusive
 
         # FOR WHICH DIRECTION DRONE NEEDS TO 'KICK OFF' WHEN LEAVING A SIGN
         SignMovements = namedtuple('SignMovements', ['x', 'y'])
         self.kickoff_movements = {
-            1: SignMovements( 0.1, 0),
+            1: SignMovements( 2, 0),
             2: SignMovements( 0.1, 0),
             3: SignMovements( 0.1, 0),
             4: SignMovements( 0.1, 0),
@@ -107,12 +118,18 @@ class TeamLeftDroneNode:
         # PID ERROR ANALYSIS
         self.error_history = np.zeros(200)
 
+        self.coord_msg.task_complete = True # BECAUSE WE DON'T HAVE THE OTHER DRONE TO SET THIS TO TRUE
+
         # WAIT FOR EVERYTHING TO INITIALIZE
         rospy.sleep(0.5)
     
     # -- CALLBACKS --
-    def nn_hsk_callback(self, msg):
-        self.nn_hsk = True
+    def score_tracker_callback(self, msg):
+        if self.msg_is_clue(msg.data):
+            self.nn_resp_received=True
+    
+    # def nn_hsk_callback(self, msg):
+        # self.nn_hsk = True
     
     def alt_callback(self, msg):
         self.altitude = msg.data
@@ -135,23 +152,39 @@ class TeamLeftDroneNode:
         self.side_img = self.bridge.imgmsg_to_cv2(data, "bgr8")
         return
     
-    def nn_resp_callback(self,data):
-        "sets self.nn_resp_recieved to True and populates self.nn_response with msg"
-        self.nn_response = data
-        self.nn_resp_recieved = True
-        return
+    # def nn_resp_callback(self,data):
+    #     "sets self.nn_resp_received to True and populates self.nn_response with msg"
+    #     self.nn_response = data
+    #     self.nn_resp_received = True
+    #     return
+    
+    def msg_is_clue(self, string):
+        """
+            Checks if a message is a clue
+        """
+        team, password, clue_type, clue = string.split(",")
+        print(f"{team},{password},{clue_type},{clue}")
+        valid_top_words = ["1", "2", "3", "4", "5", "6", "7", "8"]
+        for tw in valid_top_words:
+            if clue_type == tw:
+                print("VALID CLUE")
+                return True
+        print("INVALID CLUE")
+        return False
+
     
     def is_initialized(self):
         """
-            Returns true if messages have been recieved from node dependencies:
+            Returns true if messages have been received from node dependencies:
             - cameras
             - depth sensor
         """
-        if self.nn_hsk == False:
-            return False
-        else:
-            # acknowledge connection
-            self.nn_hsk_pub.publish("T")
+        # leave out nn handshake for now.
+        # if self.nn_hsk == False:
+        #     return False
+        # else:
+        #     # acknowledge connection
+        #     self.nn_hsk_pub.publish("T")
         if self.altitude is None: return False
         if self.side_img is None: return False
         if self.down_img is None: return False
@@ -161,7 +194,7 @@ class TeamLeftDroneNode:
         """
         Runs state machine
         - state = approaching   -> PID on object scale and centering
-        - state = querying      -> sending images to nn and waiting for responses. publish to score_tracker if good. increment sign & state
+        - state = querying      -> waiting for score tracker publishes, once publish, move to kickoff
         - state = kickoff       -> kicking off from read sign so as to not re-read it
         - state = finished      -> publish to other drone to let them know we're done.
                                    if they are done, publish to score tracker
@@ -175,12 +208,9 @@ class TeamLeftDroneNode:
             rospy.loginfo_once("Waiting for sensor data (altitude/images)...")
             rate.sleep()
 
-        
         # START OFF COMP!!!!
         self.score_pub.publish(self.START_MSG)
-        # get us to target elevation for main phase
-        self.abs_elev_pub.publish(self.abs_elev_target)
-
+        self.nn_resp_received = False
 
         # GENERAL COMP ACTIVITY
         while not rospy.is_shutdown():
@@ -210,23 +240,29 @@ class TeamLeftDroneNode:
         """
         previous_state = self.state
 
-        # INITIAL ELEVATION BEFORE ANYTHING ELSE
-        if self.state == self.ELEVATING:
+        # START -> ELEVATING
+        if self.state==self.START:
+            self.start_timer += 1
+            if self.nn_resp_received==True:
+                self.nn_resp_received = False
+                self.abs_elev_target=0.3
+                self.state=self.ELEVATING
+        
+        # ELEVATING -> KICKOFF
+        elif self.state == self.ELEVATING:
             if self.altitude >= self.abs_elev_target:
                 self.abs_elev_target = 0.5
                 self.state = self.KICKOFF_STATE
                 self.current_sign = 1
             return
-
-        elif self.current_sign > self.LAST_SIGN_NUM:
-            self.state = self.FINISHED_STATE
-            return
-
+        
+        # APPROACH -> QUERY
         elif previous_state == self.APPROACH_STATE and self.ready_to_query:
             self.ready_to_query = False
             self.state = self.QUERY_STATE
             self.clear_PID_errors()
         
+        # QUERY -> KICKOFF
         elif previous_state == self.QUERY_STATE and self.ready_to_kickoff:
             if self.current_sign == 1:
                 self.clear_PID_errors()
@@ -235,21 +271,24 @@ class TeamLeftDroneNode:
                 self.ready_to_kickoff = False
                 self.state = self.KICKOFF_STATE
         
+        # KICKOFF -> APPROACH/FINISHED
         elif previous_state == self.KICKOFF_STATE:
             self.kickoff_timer += 1 
             
             # ONLY do this once the timer is actually finished
-            if self.kickoff_timer > self.KICKOFF_CYCLES: 
+            if self.kickoff_timer > self.KICKOFF_CYCLES:
+                self.ko_rec_timer = 0 
+                self.ko_rec_complete = False
                 self.kickoff_timer = 0
                 self.current_sign += 1
-                
-                # Check if we are done after incrementing
-                if self.current_sign > self.LAST_SIGN_NUM:
-                    self.state = self.FINISHED_STATE
-                else:
-                    self.state = self.APPROACH_STATE
-                    self.clear_PID_errors()
-                    self.update_current_cam()
+                self.state = self.APPROACH_STATE
+                self.clear_PID_errors()
+
+
+        # CHECK IF WE'RE FINISHED.
+        if self.current_sign > self.LAST_SIGN_NUM:
+            self.state = self.FINISHED_STATE
+            return
         
         if self.state == self.FINISHED_STATE:
             # check if other drone already finished, if they did, kill comp
@@ -266,9 +305,20 @@ class TeamLeftDroneNode:
             - always performs PID control to try to prevent drifting error due to wind
         """
         # always perform PID ...
-        self.current_twist.linear.x = max(min(self.x_pid.update(self.error_x, 1.0 / self.UPDATE_HZ), 0.1), -0.1)
-        self.current_twist.linear.y = 0.01 * self.y_pid.update(self.error_y, 1.0 / self.UPDATE_HZ)
-        self.current_twist.angular.z = 0.01 * self.z_pid.update(self.error_ang_z, 1.0 / self.UPDATE_HZ)
+        self.current_twist.linear.x = self.x_pid.update(self.error_x, 1.0 / self.UPDATE_HZ)
+        self.current_twist.linear.y = self.y_pid.update(self.error_y, 1.0 / self.UPDATE_HZ)
+        self.current_twist.angular.z = self.z_pid.update(self.error_ang_z, 1.0 / self.UPDATE_HZ)
+
+        # smush errors if coming off kickoff
+        if self.ko_rec_complete == False:
+            scale = self.get_sigmoid_value(self.ko_rec_timer)
+            self.current_twist.linear.x = scale * self.current_twist.linear.x
+            self.current_twist.linear.y = scale * self.current_twist.linear.y
+            self.current_twist.angular.z = scale * self.current_twist.angular.z
+            self.ko_rec_timer += 1
+            if self.ko_rec_timer > self.KO_REC_CYCLES:
+                self.ko_rec_complete = True
+                self.ko_rec_timer = 0
         
         # ... unless we need to jump the drone to better see the sign
         if self.state == self.KICKOFF_STATE:
@@ -278,10 +328,16 @@ class TeamLeftDroneNode:
             
         # here we will be at the start. Down cam will manage l/r
         elif self.state == self.ELEVATING:
-            self.current_twist.linear.x = 0.01
-            self.current_twist.linear.y = -0.01
+            self.current_twist.linear.x = 0.05
+            self.current_twist.linear.y = -0.03
             self.current_twist.angular.z = 0.0
             return
+        
+        if self.state == self.START:
+            self.current_twist.linear.x = 0.0
+            self.current_twist.linear.y = 0.0
+            self.current_twist.angular.z = 0.0
+
 
         return
     
@@ -292,35 +348,30 @@ class TeamLeftDroneNode:
             - self.error_y      (self.state == ELEVATING)
             - self.error_ang_z  (self.state == all)
         """
-        # make sure we've recieved at least one image
+        # make sure we've received at least one image
         if self.side_img is None:
             return
+        
         bgr_img = self.side_img
+        # check if the sign 
         sign_readable = self.sign_readable(bgr_img)    
         
         if self.state == self.APPROACH_STATE and sign_readable:
             self.ready_to_query = True
 
         elif self.state == self.QUERY_STATE:
-            if self.nn_query_sent:
-                if self.nn_resp_recieved:
-                    self.handle_nn_response()
-                    self.nn_query_sent = False
+            if self.nn_resp_received:
+                self.ready_to_kickoff=True
+                self.nn_resp_received=False
 
             elif sign_readable:
-                # publish image for analysis
-                ros_image = self.bridge.cv2_to_imgmsg(bgr_img, encoding="bgr8")
-                self.nn_query_pub.publish(ros_image)
-                self.nn_query_sent = True
                 self.ready_to_kickoff = False
 
-            self.nn_resp_recieved = False
         # X, Y, YAW ALIGNMENT ANALYSIS
         self.front_img_to_xyyaw(bgr_img)
 
         # LEFT/RIGHT ALIGNMENT ANALYSIS IF ELEVATING IS BASED ON FRONT CAM
         if self.state == self.ELEVATING:
-            # self.front_img_to_y(bgr_img)
             self.error_y = 0
             self.error_ang_z = 0
         return
@@ -331,8 +382,8 @@ class TeamLeftDroneNode:
             - if there are multiple sign signatures, takes the left-most signature
             - error_x is determined based on the height of the side of the sign
         """
-        GOAL_HEIGHT_RATIO = 0.05 
-        GOAL_HEIGHT_RATIO_APPROACH = 0.005
+        GOAL_HEIGHT_RATIO = 0.05
+        GOAL_HEIGHT_RATIO_APPROACH = 0.05
 
         goal_ratio = GOAL_HEIGHT_RATIO
         if self.state==self.APPROACH_STATE:
@@ -354,7 +405,7 @@ class TeamLeftDroneNode:
             # take the left-most contour
             left_contour = min(blue_contours, key=lambda cnt:cv.boundingRect(cnt)[0])
             hull = cv.convexHull(left_contour)
-            x, y, w, h = cv.boundingRect(left_contour)
+            x, y, w, h = cv.boundingRect(hull)
             sign_height = h
             ratio = sign_height / img_h
             depth_error = (goal_ratio - ratio) * img_w
@@ -436,14 +487,6 @@ class TeamLeftDroneNode:
             self.error_ang_z = error
         else:
             self.error_ang_z = 0
-        
-        # Create the text string
-        # text = f"Error Z: {self.error_ang_z}"
-        
-        # cv.putText(img=roi_bgr, text=text, org=(20, 40), fontFace=cv.FONT_HERSHEY_SIMPLEX,
-        #            fontScale=1.0, color=(0, 0, 255),thickness=2)
-        # cv.imshow("Yaw centering", roi_bgr)
-        # cv.waitKey(1)
 
         return
 
@@ -452,7 +495,7 @@ class TeamLeftDroneNode:
             Analyzes the image from the bottom camera of the drone and adjusts, based on self.state:
             - self.error_y      (self.state != ELEVATING)
         """
-        # make sure we've recieved at least one image
+        # make sure we've received at least one image
         if self.down_img is None:
             return
         cv_image = self.down_img
@@ -518,7 +561,7 @@ class TeamLeftDroneNode:
         # NOW MASK FOR THE WHITES
         mask = self.get_line_mask(roi_mod)
         # clean up noise in grassa
-        kernel = np.ones((5,5), np.uint8)
+        kernel = np.ones((11, 11), np.uint8)
         mask = cv.erode(mask, kernel, iterations=1)
         mask = cv.dilate(mask, kernel, iterations=2)
 
@@ -539,36 +582,6 @@ class TeamLeftDroneNode:
 
         mask = cv.inRange(roi_hsv, lower_white, upper_white)
         return mask
-    
-    def handle_nn_response(self):
-        """
-            Parses nueral net response string to determine whether its analysis
-            was successful. If successful
-            - publishes to score tracker
-            - sets ready_to_kickoff flag to True
-            If unsuccessful
-            - sets ready_to_kickoff to False
-        """
-        # check if we were successful
-        success, clue = self.parse_nn_response()
-        if success:
-            self.score_pub.publish(f"{self.TEAM_NAME},{self.TEAM_PASS},{self.current_sign},{clue}")
-            self.ready_to_kickoff = True
-        else:
-            self.ready_to_kickoff = False
-
-    def parse_nn_response(self):
-        """
-            Parses neural net response string assuming format: "TRUE,CLUE" or "FALSE,CLUE"
-            and
-            - returns True/False, "CLUE"
-        """
-        data = self.nn_response.data
-        success, clue = data.split(",")
-        if success == "TRUE":
-            return True, clue
-        else:
-            return False, clue
 
     def sign_readable(self, cv_image):
         """
@@ -581,10 +594,8 @@ class TeamLeftDroneNode:
         """
         THRSHOLD_LOWER = 1000
         THRSHOLD_UPPER = 50000
-        GOAL_AREA_RATIO = 0.05 
-        GOAL_AREA_RATIO_APPROACH = 0.005
-        CENTER_TOLERANCE = 50
         sign_readable = False
+
         try:
             roi_bgr = cv_image
             contours = self.get_blue_contours(roi_bgr)
@@ -601,19 +612,6 @@ class TeamLeftDroneNode:
                 # horizontal and vertical coordinates of centroid.
                 cXY = int(M["m10"] / M["m00"])
                 cZ = int(M["m01"] / M["m00"])
-                image_width = cv_image.shape[1]
-                image_height = cv_image.shape[0]
-
-                # calculate linearized area ratio
-                # use sqrt to get into pixel-width units                
-                area_ratio = area / (image_width * image_height)
-                current_ratio_sqrt = np.sqrt(area_ratio)
-                goal_ratio_sqrt = np.sqrt(GOAL_AREA_RATIO)
-                if self.state==self.APPROACH_STATE:
-                    goal_ratio_sqrt = np.sqrt(GOAL_AREA_RATIO_APPROACH)                    
-
-                # pass linearize values to modify the xy errors
-                self.modify_errors(cXY, image_width, image_height, current_ratio_sqrt, goal_ratio_sqrt)
 
                 cv.circle(cv_image, (cXY, cZ), 7, (0,0,255), -1)
 
@@ -670,20 +668,10 @@ class TeamLeftDroneNode:
         contours = cv.findContours(solid_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[0]
         return contours
 
-    def modify_errors(self, cXY, img_w, img_h, current_ratio_sqrt, goal_ratio_sqrt):
-        """
-            Modifies the self.error_x and self.error_y based on the position of the sign centroid and current camera in use
-            - cXY is the horizontal coordinate of the centroid of the detected sign border contour
-            - updates self.error_y or self.error_x to try to center the drone over the sign horizontally
-        """
-        # positive if target far, negative if target close
-        depth_error = (goal_ratio_sqrt - current_ratio_sqrt) * img_w
-        self.error_x = depth_error
-        return   
-
     def make_state_msg(self):
         # Map integer states to readable strings
         state_names = {
+            self.START: "starting",
             self.ELEVATING: "elevating",
             self.APPROACH_STATE: "approaching",
             self.QUERY_STATE:    "querying",
@@ -742,17 +730,6 @@ class TeamLeftDroneNode:
         # add Labels
         cv.putText(frame, "Y-Error Hist", (img_w - plot_w - 10, 25), 
                    cv.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1) 
-
-    # TODO: remove this if we don't need it, but leave it just in case
-    def update_current_cam(self):
-        """
-            Updates self.current cam to be cam associated with self.current_sign
-            and self.current_state (either SETTING or LOOKING).
-            If in neither of these states, this function leaves self.current_cam
-            as it was.
-        """
-        self.current_cam = "front"
-        return
     
     def clear_PID_errors(self):
         """
@@ -765,6 +742,21 @@ class TeamLeftDroneNode:
         self.x_pid.previous_error = 0
         self.z_pid.previous_error = 0
         self.y_pid.previous_error = 0 
+    
+    def get_sigmoid_value(self, current_cycle):
+        # k=10 ensures that at cycle 0, output is ~0.006 
+        # and at max cycle, output is ~0.993
+        k = 10 
+        
+        # normalize current cycle to 0.0 - 1.0
+        normalized_x = float(current_cycle) / float(self.KO_REC_CYCLES)
+        
+        # Shift and apply steepness
+        # This maps 0.0 -> 1.0 into -5.0 -> +5.0
+        z = k * (normalized_x - 0.5)
+        
+        # Calculate Sigmoid
+        return 1 / (1 + math.exp(-z))
 
 class PIDController:
     """Simple PID controller for stabilizing in plane."""
@@ -784,6 +776,7 @@ class PIDController:
         """
         leak_coeff = 0.9
         self.integral += leak_coeff * error * dt
+        max(-1.0, min(1.0, self.integral)) # clamp integral to prevent runaway
         derivative = (error - self.previous_error) / dt if dt > 0 else 0
         output = self.kp * error + self.ki * self.integral + self.kd * derivative
         self.previous_error = error

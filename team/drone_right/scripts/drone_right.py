@@ -38,6 +38,7 @@ class TeamRightDroneNode:
         self.left_image_sub = rospy.Subscriber("camera_left/image_raw", Image, self.imageL_callback)
         self.front_image_sub = rospy.Subscriber("camera_front/image_raw", Image, self.imageF_callback)
         self.back_image_sub = rospy.Subscriber("camera_back/image_raw", Image, self.imageB_callback)
+        self.down_image_sub = rospy.Subscriber("camera_down/image_raw", Image, self.imageB_callback)
 
         # FOR NEURAL NET ANALYSIS
         self.nn_query_pub = rospy.Publisher("nn_query", Image, queue_size=1)
@@ -311,7 +312,8 @@ class TeamRightDroneNode:
             self.current_twist.linear.x = self.kickoff_movements[self.current_sign].x
             self.current_twist.linear.y = self.kickoff_movements[self.current_sign].y
         elif self.state == self.ELEVATING:
-            self.current_twist.linear.x = -0.1
+            self.current_twist.linear.x = -1
+            self.current_twist.linear.x = -1
 
         return
 
@@ -467,9 +469,8 @@ class TeamRightDroneNode:
                 # take convex hull of contours to overcome countour paths into centre of map (walls tied to roads etc.)
                 largest_contour = max(contours, key=cv.contourArea)
                 x, y, w, h = cv.boundingRect(largest_contour)
-                # hull = cv.convexHull(largest_contour) # smoothing edges
-                cv.rectangle(cv_image, (x, y), (x + w, y + h), (0, 0, 255), 2)
-                cv.drawContours(cv_image, contours, -1, (0,255,0), 2)
+                # cv.rectangle(cv_image, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                # cv.drawContours(cv_image, contours, -1, (0,255,0), 2)
 
                 cXY = x + w//2
                 cZ = y + h//2
@@ -485,7 +486,7 @@ class TeamRightDroneNode:
                 # pass linearize values to modify the xy errors
                 self.modify_errors(cXY, image_width, image_height, h, GOAL_HEIGHT_RATIO)
 
-                cv.circle(cv_image, (cXY, cZ), 7, (0,255,0), -1)
+                # cv.circle(cv_image, (cXY, cZ), 7, (0,255,0), -1)
 
                 area = cv.contourArea(largest_contour)
                 is_centered = abs(cXY - image_width//2) < CENTER_TOLERANCE
@@ -494,8 +495,8 @@ class TeamRightDroneNode:
                 if is_centered and is_sized:
                     is_readable = True
                 
-            cv.imshow(self.window_name, cv_image)
-            cv.waitKey(1)
+            # cv.imshow(self.window_name, cv_image)
+            # cv.waitKey(1)
             
         except CvBridgeError as e:
             rospy.logerr(f"CvBridge Error: {e}")

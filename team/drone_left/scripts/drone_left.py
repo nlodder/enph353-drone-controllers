@@ -8,6 +8,7 @@ from std_msgs.msg import Float64, String
 from drone_msgs.msg import DroneMessage
 import numpy as np
 from collections import namedtuple
+import math
 
 class TeamLeftDroneNode:
     def __init__(self):
@@ -15,13 +16,11 @@ class TeamLeftDroneNode:
         self.UPDATE_HZ = 30
 
         # STATE CONSTANTS
-        self.LOOKING_STATE = 0
         self.APPROACH_STATE = 1
-        self.SETTING_STATE = 2
-        self.QUERY_STATE = 3
-        self.KICKOFF_STATE = 4
-        self.FINISHED_STATE = 5
-        self.ELEVATING = 6
+        self.QUERY_STATE = 2
+        self.KICKOFF_STATE = 3
+        self.FINISHED_STATE = 4
+        self.ELEVATING = 5
 
         # STATE CHANGE FLAGS
         self.ready_to_approach = False
@@ -31,15 +30,18 @@ class TeamLeftDroneNode:
         self.ready_to_look = False
 
         self.kickoff_timer = 0
-        self.KICKOFF_CYCLES = 30
-        
-        # Subscribe to the camera topic defined in Gazebo plugin
-        self.right_image_sub = rospy.Subscriber("camera_right/image_raw", Image, self.imageR_callback)
-        self.left_image_sub = rospy.Subscriber("camera_left/image_raw", Image, self.imageL_callback)
+        self.KICKOFF_CYCLES = 20
+
         self.front_image_sub = rospy.Subscriber("camera_front/image_raw", Image, self.imageF_callback)
-        self.back_image_sub = rospy.Subscriber("camera_back/image_raw", Image, self.imageB_callback)
+        self.back_image_sub = rospy.Subscriber("camera_down/image_raw", Image, self.imageD_callback)
 
         # FOR NEURAL NET ANALYSIS
+        # handshake
+        self.nn_hsk = False
+        self.nn_hsk_pub = rospy.Publisher("nn_hsk_ack", String, queue_size=10)
+        self.nn_hsk_sub = rospy.Subscriber("nn_hsk", String, self.nn_hsk_callback)
+
+        # analysis
         self.nn_query_pub = rospy.Publisher("nn_query", Image, queue_size=1)
         self.nn_resp_sub = rospy.Subscriber("nn_resp", String, self.nn_resp_callback)
         self.nn_response = None
@@ -63,20 +65,23 @@ class TeamLeftDroneNode:
 
         self.abs_elev_pub = rospy.Publisher("abs_z_target", Float64, queue_size=1) # publish absolute elevation target for cmd bridge to maintain for oversight
         self.alt_sub = rospy.Subscriber("altitude", Float64, self.alt_callback)
-        self.abs_elev_target = 0.3 # desired absolute elevation target for oversight, adjust as needed
+        self.abs_elev_target = 0.3 # desired absolute elevation target for before starting line following PID
         self.altitude = None # current altitude of drone, updated from laser scan data
 
         self.bridge = CvBridge()
         self.window_name = f"{rospy.get_namespace()} camera feed"
-        self.current_image = None
+        self.side_img = None
+        self.down_img = None
 
         self.current_twist = Twist()
 
         # HORIZONTAL ALIGNMENT PID
         self.x_pid = PIDController(kp=0.004, ki=0.0, kd=0.008)
-        self.y_pid = PIDController(kp=0.004, ki=0.0, kd=0.008)
+        self.y_pid = PIDController(kp=0.5, ki=0.001, kd=0.2)
+        self.z_pid = PIDController(kp=0.1, ki=0.0, kd=0.001)
         self.error_x = 0.0
         self.error_y = 0.0
+        self.error_ang_z = 0.0
 
         # HSV RANGE FOR SIGN COLORS
         self.LOWER_BLUE = (100, 150, 50)
@@ -85,70 +90,49 @@ class TeamLeftDroneNode:
         # -- SETUP UNIQUE TO TEAM MEMBER --
         # PERSISTANT VARIABLES
         self.state = self.QUERY_STATE
-        self.current_cam = "right" # which cam feed we are currently using for image processing.
+        self.current_cam = "front" # which cam feed we are currently using for image processing.
         self.current_sign = 1
-        self.LAST_SIGN_NUM = 4 # all the signs this drone is responsible for inclusive
-
-        # FOR WHICH DIRECTION DRONE NEEDS TO 'JUMP' WHEN ARRIVING AT SIGN TO READ IT
-        SignMovements = namedtuple('SignMovements', ['x', 'y'])
-        self.setting_movements = {
-            1: SignMovements(  0,  0),
-            2: SignMovements(  0,  0),
-            3: SignMovements(  0,  0),
-            4: SignMovements( -1, -1)
-        }
+        self.LAST_SIGN_NUM = 6 # all the signs this drone is responsible for inclusive
 
         # FOR WHICH DIRECTION DRONE NEEDS TO 'KICK OFF' WHEN LEAVING A SIGN
+        SignMovements = namedtuple('SignMovements', ['x', 'y'])
         self.kickoff_movements = {
-            1: SignMovements( -0.2, -1),
-            2: SignMovements(   -1, -1),
-            3: SignMovements(   -1,  1),
-            4: SignMovements(    0,  0)
+            1: SignMovements( 0.1, 0),
+            2: SignMovements( 0.1, 0),
+            3: SignMovements( 0.1, 0),
+            4: SignMovements( 0.1, 0),
+            5: SignMovements( 0.1, 0),
+            6: SignMovements( 0.1, 0)
         }
+        # PID ERROR ANALYSIS
+        self.error_history = np.zeros(200)
 
-        # FOR TRACKING WHICH CAMERA THE DRONE SHOULD BE USING
-        SignInfo = namedtuple('SignInfo', ['approach_cam', 'setting_cam', 'clue_type'])
-        self.sign_dict = {
-            1: SignInfo("right", "right", "SIZE"),
-            2: SignInfo("right", "right", "VICTIM"),
-            3: SignInfo("back", "back", "CRIME"),
-            4: SignInfo("back", "left", "TIME")
-        }
-
-
+        # WAIT FOR EVERYTHING TO INITIALIZE
         rospy.sleep(0.5)
-        # START OFF COMP!!!!
-        self.score_pub.publish(self.START_MSG)
     
     # -- CALLBACKS --
+    def nn_hsk_callback(self, msg):
+        self.nn_hsk = True
+    
     def alt_callback(self, msg):
         self.altitude = msg.data
     
     def coordination_callback(self, msg):
         self.coord_msg = msg
         return
-
-    # CALLBACKS FOR FOUR CAMERAS - only process image if from cam of interest
-    def imageR_callback(self, data):
-        if self.current_cam == "right":
-            self.image_callback(data)
-        return
-    def imageL_callback(self, data):
-        if self.current_cam == "left":
-            self.image_callback(data)
-        return
+    
     def imageF_callback(self, data):
         if self.current_cam == "front":
             self.image_callback(data)
         return
-    def imageB_callback(self, data):
-        if self.current_cam == "back":
-            self.image_callback(data)
-        return
+    
+    def imageD_callback(self, data):
+        """Updates self.down_img with image converted to cv2 bgr8 format"""
+        self.down_img = self.bridge.imgmsg_to_cv2(data, "bgr8")
 
     def image_callback(self, data):
-        """Updates self.current_image with image converted to cv2 bgr8 format"""
-        self.current_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
+        """Updates self.side_img with image converted to cv2 bgr8 format"""
+        self.side_img = self.bridge.imgmsg_to_cv2(data, "bgr8")
         return
     
     def nn_resp_callback(self,data):
@@ -163,16 +147,20 @@ class TeamLeftDroneNode:
             - cameras
             - depth sensor
         """
+        if self.nn_hsk == False:
+            return False
+        else:
+            # acknowledge connection
+            self.nn_hsk_pub.publish("T")
         if self.altitude is None: return False
-        if self.current_image is None: return False
+        if self.side_img is None: return False
+        if self.down_img is None: return False
         return True
 
     def run(self):
         """
         Runs state machine
-        - state = looking       -> search for sign signature in cam associated with self.current_sign
         - state = approaching   -> PID on object scale and centering
-        - state = setting       -> executing shift if necessary and centering
         - state = querying      -> sending images to nn and waiting for responses. publish to score_tracker if good. increment sign & state
         - state = kickoff       -> kicking off from read sign so as to not re-read it
         - state = finished      -> publish to other drone to let them know we're done.
@@ -180,25 +168,30 @@ class TeamLeftDroneNode:
         """
         rate = rospy.Rate(self.UPDATE_HZ)
         
-        # wait until sensor comms established
+        # WAIT ON SENSOR COMMUNICATION
         while not rospy.is_shutdown() and not self.is_initialized():
             state_msg = self.make_state_msg()
             self.state_pub.publish(state_msg)
             rospy.loginfo_once("Waiting for sensor data (altitude/images)...")
             rate.sleep()
+
         
+        # START OFF COMP!!!!
+        self.score_pub.publish(self.START_MSG)
         # get us to target elevation for main phase
         self.abs_elev_pub.publish(self.abs_elev_target)
-        
+
+
+        # GENERAL COMP ACTIVITY
         while not rospy.is_shutdown():
             # analyze current image and update states if necessary
-            self.analyze_image()
-
-            # update movement demands based on image analysis and current state
-            self.update_mov_demands()
+            self.analyze_front_img()
 
             # update state per results of last cycle
             self.update_state()
+
+            # update movement demands based on image analysis and current state
+            self.update_mov_demands()
             
             # update command bridge with movement demands
             self.abs_elev_pub.publish(self.abs_elev_target)
@@ -220,31 +213,27 @@ class TeamLeftDroneNode:
         # INITIAL ELEVATION BEFORE ANYTHING ELSE
         if self.state == self.ELEVATING:
             if self.altitude >= self.abs_elev_target:
-                self.state = self.QUERY_STATE
                 self.abs_elev_target = 0.5
+                self.state = self.KICKOFF_STATE
+                self.current_sign = 1
             return
 
         elif self.current_sign > self.LAST_SIGN_NUM:
             self.state = self.FINISHED_STATE
             return
 
-        elif previous_state == self.LOOKING_STATE and self.ready_to_approach:
-            self.ready_to_approach = False
-            self.state = self.APPROACH_STATE
-
-        elif previous_state == self.APPROACH_STATE and self.ready_to_set:
-            self.ready_to_set = False
-            self.state = self.SETTING_STATE
-            self.clear_PID_errors()
-            self.update_current_cam()
-        
-        elif previous_state == self.SETTING_STATE and self.ready_to_query:
+        elif previous_state == self.APPROACH_STATE and self.ready_to_query:
             self.ready_to_query = False
             self.state = self.QUERY_STATE
+            self.clear_PID_errors()
         
         elif previous_state == self.QUERY_STATE and self.ready_to_kickoff:
-            self.ready_to_kickoff = False
-            self.state = self.KICKOFF_STATE
+            if self.current_sign == 1:
+                self.clear_PID_errors()
+                self.state = self.ELEVATING
+            else:
+                self.ready_to_kickoff = False
+                self.state = self.KICKOFF_STATE
         
         elif previous_state == self.KICKOFF_STATE:
             self.kickoff_timer += 1 
@@ -258,7 +247,7 @@ class TeamLeftDroneNode:
                 if self.current_sign > self.LAST_SIGN_NUM:
                     self.state = self.FINISHED_STATE
                 else:
-                    self.state = self.LOOKING_STATE
+                    self.state = self.APPROACH_STATE
                     self.clear_PID_errors()
                     self.update_current_cam()
         
@@ -269,30 +258,6 @@ class TeamLeftDroneNode:
                 self.score_pub.publish(self.END_MSG)
 
         return
-
-    
-    def update_current_cam(self):
-        """
-            Updates self.current cam to be cam associated with self.current_sign
-            and self.current_state (either SETTING or LOOKING).
-            If in neither of these states, this function leaves self.current_cam
-            as it was.
-        """
-        if self.state == self.SETTING_STATE:
-            self.current_cam = self.sign_dict[self.current_sign].setting_cam
-        elif self.state == self.LOOKING_STATE:
-            self.current_cam = self.sign_dict[self.current_sign].approach_cam
-        return
-    
-    def clear_PID_errors(self):
-        """
-            Clears integral and derivative errors in both x and y.
-            Use this when switching to a new camera view or PID setpoint
-        """
-        self.x_pid.integral = 0
-        self.y_pid.integral = 0
-        self.x_pid.previous_error = 0
-        self.y_pid.previous_error = 0
     
     def update_mov_demands(self):
         """
@@ -301,37 +266,39 @@ class TeamLeftDroneNode:
             - always performs PID control to try to prevent drifting error due to wind
         """
         # always perform PID ...
-        self.current_twist.linear.x = self.x_pid.update(self.error_x, 1.0 / self.UPDATE_HZ)
-        self.current_twist.linear.y = self.y_pid.update(self.error_y, 1.0 / self.UPDATE_HZ)
+        self.current_twist.linear.x = max(min(self.x_pid.update(self.error_x, 1.0 / self.UPDATE_HZ), 0.1), -0.1)
+        self.current_twist.linear.y = 0.01 * self.y_pid.update(self.error_y, 1.0 / self.UPDATE_HZ)
+        self.current_twist.angular.z = 0.01 * self.z_pid.update(self.error_ang_z, 1.0 / self.UPDATE_HZ)
         
         # ... unless we need to jump the drone to better see the sign
-        if self.state == self.SETTING_STATE:
-            self.current_twist.linear.x = self.setting_movements[self.current_sign].x
-            self.current_twist.linear.y = self.setting_movements[self.current_sign].y
-        elif self.state == self.KICKOFF_STATE:
+        if self.state == self.KICKOFF_STATE:
             self.current_twist.linear.x = self.kickoff_movements[self.current_sign].x
             self.current_twist.linear.y = self.kickoff_movements[self.current_sign].y
+            self.current_twist.angular.z = 0
+            
+        # here we will be at the start. Down cam will manage l/r
         elif self.state == self.ELEVATING:
-            # self.current_twist.linear.x = 0
-            # self.current_twist.linear.y = 0
+            self.current_twist.linear.x = 0.01
+            self.current_twist.linear.y = -0.01
+            self.current_twist.angular.z = 0.0
             return
 
         return
     
-    def analyze_image(self):
+    def analyze_front_img(self):
+        """
+            Analyzes the image from the front camera of the drone and adjusts, based on self.state:
+            - self.error_x      (self.state == all)
+            - self.error_y      (self.state == ELEVATING)
+            - self.error_ang_z  (self.state == all)
+        """
         # make sure we've recieved at least one image
-        if self.current_image is None:
+        if self.side_img is None:
             return
-        cv_image = self.current_image
-        sign_readable = self.sign_readable(cv_image)    
+        bgr_img = self.side_img
+        sign_readable = self.sign_readable(bgr_img)    
         
-        if self.state == self.LOOKING_STATE and sign_readable:
-            self.ready_to_approach = True
-
-        elif self.state == self.APPROACH_STATE and sign_readable:
-            self.ready_to_set = True
-
-        elif self.state == self.SETTING_STATE and sign_readable:
+        if self.state == self.APPROACH_STATE and sign_readable:
             self.ready_to_query = True
 
         elif self.state == self.QUERY_STATE:
@@ -342,23 +309,245 @@ class TeamLeftDroneNode:
 
             elif sign_readable:
                 # publish image for analysis
-                ros_image = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
+                ros_image = self.bridge.cv2_to_imgmsg(bgr_img, encoding="bgr8")
                 self.nn_query_pub.publish(ros_image)
                 self.nn_query_sent = True
                 self.ready_to_kickoff = False
 
             self.nn_resp_recieved = False
-        
+        # X, Y, YAW ALIGNMENT ANALYSIS
+        self.front_img_to_xyyaw(bgr_img)
+
+        # LEFT/RIGHT ALIGNMENT ANALYSIS IF ELEVATING IS BASED ON FRONT CAM
+        if self.state == self.ELEVATING:
+            # self.front_img_to_y(bgr_img)
+            self.error_y = 0
+            self.error_ang_z = 0
         return
+    
+    def front_img_to_xyyaw(self, bgr_img):
+        """
+            Takes image from the front camera and analyzes for error_x (fwd/bkwd)
+            - if there are multiple sign signatures, takes the left-most signature
+            - error_x is determined based on the height of the side of the sign
+        """
+        GOAL_HEIGHT_RATIO = 0.05 
+        GOAL_HEIGHT_RATIO_APPROACH = 0.005
+
+        goal_ratio = GOAL_HEIGHT_RATIO
+        if self.state==self.APPROACH_STATE:
+            goal_ratio = GOAL_HEIGHT_RATIO_APPROACH
+
+        # crop out the top third of the image
+        img_h = bgr_img.shape[0]
+        img_w = bgr_img.shape[1]
+        roi_y_start = img_h // 3
+        roi_y_end = img_h
+        roi_bgr = bgr_img[roi_y_start:roi_y_end,  : ]
+
+        # GET SIGNS AND FILL THEM IN FOR
+        roi_mod = roi_bgr.copy()
+
+        # GET RID OF THE WHITE INSIDE THE BLUE SIGNS
+        blue_contours = self.get_blue_contours(roi_bgr)
+        if blue_contours:
+            # take the left-most contour
+            left_contour = min(blue_contours, key=lambda cnt:cv.boundingRect(cnt)[0])
+            hull = cv.convexHull(left_contour)
+            x, y, w, h = cv.boundingRect(left_contour)
+            sign_height = h
+            ratio = sign_height / img_h
+            depth_error = (goal_ratio - ratio) * img_w
+            self.error_x = depth_error
+            cX = x + w//2
+            self.error_y = img_w//2 - cX
+            self.error_ang_z = img_w//2 - cX
+
+        # if no blue, set error_x to zero to prevent spinning out
+        else:
+            self.error_x = 0
+
+        # Create the text string
+        textz = f"Error Ang Z: {self.error_ang_z:.2f}"
+        texty = f"Error Lin Y: {self.error_x:.2f}"
+        textx = f"Error Lin X: {self.error_y:.2f}"
+        
+        cv.putText(img=roi_bgr, text=textx, org=(20, 40), fontFace=cv.FONT_HERSHEY_SIMPLEX,
+                   fontScale=0.8, color=(0, 0, 255),thickness=2)
+        cv.putText(img=roi_bgr, text=texty, org=(20, 60), fontFace=cv.FONT_HERSHEY_SIMPLEX,
+                   fontScale=0.8, color=(0, 0, 255),thickness=2)
+        cv.putText(img=roi_bgr, text=textz, org=(20, 80), fontFace=cv.FONT_HERSHEY_SIMPLEX,
+                   fontScale=0.8, color=(0, 0, 255),thickness=2)
+        cv.imshow("Front centering", roi_bgr)
+        cv.waitKey(1)
+
+        return
+
+    def front_img_to_y(self, bgr_img):
+        """
+            Takes image from the front camera, analyzes the bottom fourth and adjusts y-error
+            to centroid of the road
+            - modifies self.error_y
+        """
+        # crop the image to the bottom fourth
+        img_h = bgr_img.shape[0]
+        img_w = bgr_img.shape[1]
+        roi_y_start = (img_h * 5) // 8
+        roi_y_end = img_h
+        roi_bgr = bgr_img[roi_y_start:roi_y_end,  : ]
+
+        M = self.get_line_moments(roi_bgr)
+        if M["m00"] > 0:
+            cX = int(M["m10"] / M["m00"])
+            img_center = img_w // 2
+            cv.circle(roi_bgr, center=(cX, img_h//8), radius=20, color=(0,0,255), thickness=-1)
+
+            # error > 0 -> shift right
+            # error < 0 -> shift left
+            error = img_center - cX
+            self.error_y = error
+        else:
+            self.error_y = 0
+
+        return
+
+    def front_img_to_yaw(self, bgr_img):
+        """
+            Takes the image from the front camera, analyzes the bottom fourth and adjusts yaw to
+            centroid of road if in ELEVATING mode
+            If in any other mode 
+        """
+        # crop the image to the bottom fourth
+        img_h = bgr_img.shape[0]
+        img_w = bgr_img.shape[1]
+        roi_y_start = (img_h * 3)//4
+        roi_y_end = img_h
+        roi_bgr = bgr_img[roi_y_start:roi_y_end,  : ]
+
+        M = self.get_line_moments(roi_bgr)
+        if M["m00"] > 0:
+            cX = int(M["m10"] / M["m00"])
+            img_center = img_w // 2
+            cv.circle(roi_bgr, center=(cX, img_h//8), radius=20, color=(0,0,255), thickness=-1)
+
+            # error > 0 -> pivot right
+            # error < 0 -> pivot left
+            error = img_center - cX
+            self.error_ang_z = error
+        else:
+            self.error_ang_z = 0
+        
+        # Create the text string
+        # text = f"Error Z: {self.error_ang_z}"
+        
+        # cv.putText(img=roi_bgr, text=text, org=(20, 40), fontFace=cv.FONT_HERSHEY_SIMPLEX,
+        #            fontScale=1.0, color=(0, 0, 255),thickness=2)
+        # cv.imshow("Yaw centering", roi_bgr)
+        # cv.waitKey(1)
+
+        return
+
+    def analyze_down_img(self):
+        """
+            Analyzes the image from the bottom camera of the drone and adjusts, based on self.state:
+            - self.error_y      (self.state != ELEVATING)
+        """
+        # make sure we've recieved at least one image
+        if self.down_img is None:
+            return
+        cv_image = self.down_img
+        # reduce size to save compute, take full width for now
+        img_h = cv_image.shape[0]
+        img_w = cv_image.shape[1]
+        des_offset_from_right = img_w // 4
+        roi_y_start = 0 # top
+        roi_y_end = img_h//2 # third of the way down
+        roi_bgr = cv_image[roi_y_start:roi_y_end,  : ]
+
+        # find center of white lines
+        M = self.get_line_moments(roi_bgr)
+
+        if M["m00"] > 0:
+            cX = int(M["m10"] / M["m00"])
+            img_center = img_w // 2
+
+            # error > 0 -> turn right
+            # error < 0 -> turn left
+            error = img_center - cX
+            self.error_y = error
+
+            # Create the text string
+            text = f"Error Y: {self.error_y}"
+            
+            cv.putText(
+                img=roi_bgr, 
+                text=text, 
+                org=(20, 40),              # Coordinates (x, y) from top-left
+                fontFace=cv.FONT_HERSHEY_SIMPLEX, 
+                fontScale=1.0, 
+                color=(0, 0, 255),
+                thickness=2
+            )
+            # draw a vertical line where the drone thinks the line is
+            cv.line(roi_bgr, (cX, 0), (cX, roi_y_end), (255, 0, 0), 2)
+        
+        self.draw_error_plot(roi_bgr)
+        cv.imshow("Line following", roi_bgr)
+
+        return
+
+    def get_line_moments(self, roi_bgr):
+        """
+            Gets the moments of white lines in the roi provided.
+            - pass roi image in bgr8 format
+            - returns moment of the white lines found with cv2.moments
+            - cuts out the white from the signs using self.get_blue_contours and filling them in blue
+              before masking for whites.
+            - gets the line mask based on internally defined thresholding in self.get_line_mask()
+            - cleans up noise in line mask with cv2.erode and cv2.dilate
+            - returns moments of white lines from cv2.moments()
+        """
+        roi_mod = roi_bgr.copy()
+        # GET RID OF THE WHITE INSIDE THE BLUE SIGNS
+        blue_contours = self.get_blue_contours(roi_bgr)
+        if blue_contours:
+            for contour in blue_contours:
+                hull= cv.convexHull(contour)
+                cv.drawContours(roi_mod, [hull], -1, (255, 0, 0), thickness=-1)
+
+        # NOW MASK FOR THE WHITES
+        mask = self.get_line_mask(roi_mod)
+        # clean up noise in grassa
+        kernel = np.ones((5,5), np.uint8)
+        mask = cv.erode(mask, kernel, iterations=1)
+        mask = cv.dilate(mask, kernel, iterations=2)
+
+        # find center of white lines
+        M = cv.moments(mask)
+        return M
+
+    def get_line_mask(self, roi_bgr):
+        """
+            Takes bgr image and returns a mask of the white pixels based on an internally
+            defined color range.
+        """
+        roi_hsv = cv.cvtColor(roi_bgr, cv.COLOR_BGR2HSV)
+
+        # low saturation because white is low saturation whereas grass speckles may be high
+        lower_white = np.array([0,0,200])
+        upper_white = np.array([180,40,255])
+
+        mask = cv.inRange(roi_hsv, lower_white, upper_white)
+        return mask
     
     def handle_nn_response(self):
         """
-        Parses nueral net response string to determine whether its analysis
-        was successful. If successful
-        - publishes to score tracker
-        - sets ready_to_kickoff flag to True
-        If unsuccessful
-        - sets ready_to_kickoff to False
+            Parses nueral net response string to determine whether its analysis
+            was successful. If successful
+            - publishes to score tracker
+            - sets ready_to_kickoff flag to True
+            If unsuccessful
+            - sets ready_to_kickoff to False
         """
         # check if we were successful
         success, clue = self.parse_nn_response()
@@ -370,9 +559,9 @@ class TeamLeftDroneNode:
 
     def parse_nn_response(self):
         """
-        Parses neural net response string assuming format: "TRUE,CLUE" or "FALSE,CLUE"
-        and
-        - returns True/False, "CLUE"
+            Parses neural net response string assuming format: "TRUE,CLUE" or "FALSE,CLUE"
+            and
+            - returns True/False, "CLUE"
         """
         data = self.nn_response.data
         success, clue = data.split(",")
@@ -380,22 +569,15 @@ class TeamLeftDroneNode:
             return True, clue
         else:
             return False, clue
-    
-    def read_sign(self, cv_image):
-        """
-            Uses a neural network to read the sign in the image and return a confidence in the read and the predicted clue.
-            For now, this is just a placeholder that returns random values. You can replace this with your actual neural network inference code.
-        """
-        return True, "THIS"
 
     def sign_readable(self, cv_image):
         """
-        Masks image for the blue color of the sign. If the sign is fully in frame and also large enough,
-        return true to indicate that sign may be readable by our neural network.
-        - conditions for readability:
-            - threshold_upper > contour area > threshold_lower (to ensure sign is large enough in frame but not just a corner)
-            - centroid of contour associated with sign border is near center of image
-            - modifies the x_error and y_error for PID centering if sign border is detected, to try to center the drone over the sign for better reads.
+            Masks image for the blue color of the sign. If the sign is fully in frame and also large enough,
+            return true to indicate that sign may be readable by our neural network.
+            - conditions for readability:
+                - threshold_upper > contour area > threshold_lower (to ensure sign is large enough in frame but not just a corner)
+                - centroid of contour associated with sign border is near center of image
+                - modifies the x_error and y_error for PID centering if sign border is detected, to try to center the drone over the sign for better reads.
         """
         THRSHOLD_LOWER = 1000
         THRSHOLD_UPPER = 50000
@@ -404,18 +586,11 @@ class TeamLeftDroneNode:
         CENTER_TOLERANCE = 50
         sign_readable = False
         try:
-            hsv_image = cv.cvtColor(cv_image, cv.COLOR_BGR2HSV)
-            # filter for a range around common 'blue'
-            mask = cv.inRange(hsv_image, self.LOWER_BLUE, self.UPPER_BLUE)
-
-            # this should close any 'broken' edges...
-            kernel = np.ones((20, 20), np.uint8)
-            solid_mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel)
-
-            contours = cv.findContours(solid_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[0]
+            roi_bgr = cv_image
+            contours = self.get_blue_contours(roi_bgr)
             
             if len(contours) > 0:
-                # take convex hull of contours to overcome countour paths into centre of map (walls tied to roads etc.)
+                # take convex hull of contours to overcome interior countour paths
                 largest_contour = max(contours, key=cv.contourArea)
                 hull = cv.convexHull(largest_contour) # smoothing edges
                 cv.drawContours(cv_image, [hull], -1, (0,0,255), 2)
@@ -434,7 +609,7 @@ class TeamLeftDroneNode:
                 area_ratio = area / (image_width * image_height)
                 current_ratio_sqrt = np.sqrt(area_ratio)
                 goal_ratio_sqrt = np.sqrt(GOAL_AREA_RATIO)
-                if self.state == self.LOOKING_STATE or self.state==self.APPROACH_STATE:
+                if self.state==self.APPROACH_STATE:
                     goal_ratio_sqrt = np.sqrt(GOAL_AREA_RATIO_APPROACH)                    
 
                 # pass linearize values to modify the xy errors
@@ -444,8 +619,32 @@ class TeamLeftDroneNode:
 
                 # check if contour area is within thresholds and centroid is near center of image
                 # don't worryabout centering in height, only in xy
-                if THRSHOLD_LOWER < area < THRSHOLD_UPPER and abs(cXY - image_width//2) < CENTER_TOLERANCE:
+                if THRSHOLD_LOWER < area < THRSHOLD_UPPER:
                     sign_readable = True
+            
+                # Create the text string
+                text = f"Area: {area}"
+                readable = f"Readable: {sign_readable}"
+                
+                cv.putText(
+                    img=cv_image, 
+                    text=text, 
+                    org=(20, 50),              # Coordinates (x, y) from top-left
+                    fontFace=cv.FONT_HERSHEY_SIMPLEX, 
+                    fontScale=0.8, 
+                    color=(0, 255, 0),               # White for Grayscale/Mask
+                    thickness=2
+                )
+
+                cv.putText(
+                    img=cv_image, 
+                    text=readable, 
+                    org=(20, 90),              # Coordinates (x, y) from top-left
+                    fontFace=cv.FONT_HERSHEY_SIMPLEX, 
+                    fontScale=0.8, 
+                    color=(0, 255, 0),               # White for Grayscale/Mask
+                    thickness=2
+                )
                 
             cv.imshow(self.window_name, cv_image)
             cv.waitKey(1)
@@ -453,6 +652,23 @@ class TeamLeftDroneNode:
         except CvBridgeError as e:
             rospy.logerr(f"CvBridge Error: {e}")
         return sign_readable
+    
+    def get_blue_contours(self, roi_bgr):
+        """
+            Returns the contours of the blue sign candidates found in an roi
+            - pass in roi in bgr8 format
+            - masks based on self.LOWER_BLUE, self.UPPER_BLUE
+        """
+        hsv_image = cv.cvtColor(roi_bgr, cv.COLOR_BGR2HSV)
+        # filter for a range around common 'blue'
+        mask = cv.inRange(hsv_image, self.LOWER_BLUE, self.UPPER_BLUE)
+
+        # this should close any 'broken' edges...
+        kernel = np.ones((20, 20), np.uint8)
+        solid_mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel)
+
+        contours = cv.findContours(solid_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[0]
+        return contours
 
     def modify_errors(self, cXY, img_w, img_h, current_ratio_sqrt, goal_ratio_sqrt):
         """
@@ -460,40 +676,16 @@ class TeamLeftDroneNode:
             - cXY is the horizontal coordinate of the centroid of the detected sign border contour
             - updates self.error_y or self.error_x to try to center the drone over the sign horizontally
         """
-        # positive if target left, negative if target right
-        centroid_error = (img_w//2) - cXY
         # positive if target far, negative if target close
         depth_error = (goal_ratio_sqrt - current_ratio_sqrt) * img_w
-        
-        if self.current_cam == "right":
-            # camera looks at +Y, centroid error moves drone on X, depth error moves drone on Y
-            self.error_x = -centroid_error
-            self.error_y = -depth_error
-
-        elif self.current_cam == "left":
-            # camera looks at -Y, centroid error moves drone on X, depth error moves drone on Y
-            self.error_x = centroid_error
-            self.error_y = depth_error
-
-        elif self.current_cam == "front":
-            # camera looks at -X, centroid error moves drone on Y, depth error moves drone on X
-            self.error_x = depth_error
-            self.error_y = centroid_error
-        
-        elif self.current_cam == "back":
-            # camera looks at +X, centroid error moves drone on Y, depth error moves drone on X
-            self.error_x = -depth_error
-            self.error_y = -centroid_error
-    
+        self.error_x = depth_error
         return   
 
     def make_state_msg(self):
         # Map integer states to readable strings
         state_names = {
             self.ELEVATING: "elevating",
-            self.LOOKING_STATE:  "looking",
             self.APPROACH_STATE: "approaching",
-            self.SETTING_STATE:  "setting",
             self.QUERY_STATE:    "querying",
             self.KICKOFF_STATE:  "kick off",
             self.FINISHED_STATE: "finished"
@@ -503,14 +695,76 @@ class TeamLeftDroneNode:
         
         # Create a formatted multi-line string with fixed-width columns
         msg = (
-            f"{'DRONE STATUS: ':^30}"
-            f"{' || current state:':<15} {current_state_str}"
+            f"{'current state:':<15} {current_state_str}"
             f"{' || current sign:':<15} {self.current_sign}"
             f"{' || velocity x:':<15} {self.current_twist.linear.x:>8.3f}"
             f"{' || velocity y:':<15} {self.current_twist.linear.y:>8.3f}"
             f"{' || kickoff cycle:':<15} {self.kickoff_timer:>8.3f}"
         )
-        return msg   
+        return msg 
+
+    def draw_error_plot(self, frame):
+        """
+        Draws a scrolling error plot across the top of the frame.
+        """
+        plot_h = 80  # Height of the plot area
+        plot_w = 200 # Width of the plot (matching history buffer)
+        img_w = frame.shape[1]
+        
+        # update history (shift left and add current error)
+        # normalizing error so it fits in the plot_h (adjust 100 based on typical max error)
+        norm_error = np.clip(self.error_y, -100, 100) 
+        self.error_history = np.roll(self.error_history, -1)
+        self.error_history[-1] = norm_error
+
+        # create a black background for the plot
+        # placing it at the top-right
+        cv.rectangle(frame, (img_w - plot_w - 10, 10), (img_w - 10, 10 + plot_h), (0, 0, 0), -1)
+        cv.rectangle(frame, (img_w - plot_w - 10, 10), (img_w - 10, 10 + plot_h), (100, 100, 100), 1)
+        
+        # draw Center Reference Line
+        ref_y = 10 + (plot_h // 2)
+        cv.line(frame, (img_w - plot_w - 10, ref_y), (img_w - 10, ref_y), (50, 50, 50), 1)
+
+        # draw the Plot Line
+        for i in range(1, len(self.error_history)):
+            # Map history values to pixel coordinates
+            pt1_x = (img_w - plot_w - 10) + (i - 1)
+            pt2_x = (img_w - plot_w - 10) + i
+            
+            # Scale error: plot_h//2 is the middle, 0.4 is a scaling factor
+            pt1_y = ref_y - int(self.error_history[i-1] * 0.4)
+            pt2_y = ref_y - int(self.error_history[i] * 0.4)
+            
+            # Draw the line segment
+            cv.line(frame, (pt1_x, pt1_y), (pt2_x, pt2_y), (0, 255, 0), 1)
+
+        # add Labels
+        cv.putText(frame, "Y-Error Hist", (img_w - plot_w - 10, 25), 
+                   cv.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1) 
+
+    # TODO: remove this if we don't need it, but leave it just in case
+    def update_current_cam(self):
+        """
+            Updates self.current cam to be cam associated with self.current_sign
+            and self.current_state (either SETTING or LOOKING).
+            If in neither of these states, this function leaves self.current_cam
+            as it was.
+        """
+        self.current_cam = "front"
+        return
+    
+    def clear_PID_errors(self):
+        """
+            Clears integral and derivative errors in both x and y.
+            Use this when switching to a new camera view or PID setpoint
+        """
+        self.x_pid.integral = 0
+        self.z_pid.integral = 0
+        self.y_pid.integral = 0
+        self.x_pid.previous_error = 0
+        self.z_pid.previous_error = 0
+        self.y_pid.previous_error = 0 
 
 class PIDController:
     """Simple PID controller for stabilizing in plane."""
@@ -528,7 +782,8 @@ class PIDController:
          - dt: time step in seconds
          Returns the control output velocity to apply.
         """
-        self.integral += error * dt
+        leak_coeff = 0.9
+        self.integral += leak_coeff * error * dt
         derivative = (error - self.previous_error) / dt if dt > 0 else 0
         output = self.kp * error + self.ki * self.integral + self.kd * derivative
         self.previous_error = error

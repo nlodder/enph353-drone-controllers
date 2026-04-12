@@ -24,7 +24,7 @@ class TeamLeftDroneNode:
         self.ELEVATING = 5
 
         self.start_timer = 0
-        self.START_CYCLES = 2000
+        self.START_CYCLES = 10
         self.started = False
 
         # STATE CHANGE FLAGS
@@ -36,18 +36,12 @@ class TeamLeftDroneNode:
 
         self.kickoff_timer = 0
         self.KICKOFF_CYCLES = 10
-        self.KO_REC_CYCLES = 40
+        self.KO_REC_CYCLES = 20
         self.ko_rec_timer = 0
         self.ko_rec_complete = False
 
         self.front_image_sub = rospy.Subscriber("camera_front/image_raw", Image, self.imageF_callback)
         self.back_image_sub = rospy.Subscriber("camera_down/image_raw", Image, self.imageD_callback)
-
-        # FOR NEURAL NET ANALYSIS
-        # handshake
-        # self.nn_hsk = False
-        # self.nn_hsk_pub = rospy.Publisher("nn_hsk_ack", String, queue_size=10)
-        # self.nn_hsk_sub = rospy.Subscriber("nn_hsk", String, self.nn_hsk_callback)
 
         # CHECKING IF NN GOT READ
         self.nn_resp_received = False
@@ -81,9 +75,9 @@ class TeamLeftDroneNode:
         self.current_twist = Twist()
 
         # HORIZONTAL ALIGNMENT PID
-        self.x_pid = PIDController(kp=1, ki=0.001, kd=1)
-        self.y_pid = PIDController(kp=4, ki=0.001, kd=1)
-        self.z_pid = PIDController(kp=4, ki=0.0, kd=0.01)
+        self.x_pid = PIDController(kp=50, ki=0.0, kd=0)
+        self.y_pid = PIDController(kp=200, ki=0.0, kd=20)
+        self.z_pid = PIDController(kp=60, ki=0.0, kd=0)
         self.error_x = 0.0
         self.error_y = 0.0
         self.error_ang_z = 0.0
@@ -98,12 +92,12 @@ class TeamLeftDroneNode:
         self.LOWER_BLUE = (100, 150, 50)
         self.UPPER_BLUE = (140, 255, 255)
 
-        # -- SETUP UNIQUE TO TEAM MEMBER --
+        # -- SETUP UNIQUE TO TEAM MEMBER (drone left vs drone right)--
         # PERSISTANT VARIABLES
         self.state = self.START
         self.current_cam = "front" # which cam feed we are currently using for image processing.
         self.current_sign = 1
-        self.LAST_SIGN_NUM = 1 # all the signs this drone is responsible for inclusive
+        self.LAST_SIGN_NUM = 6 # all the signs this drone is responsible for inclusive
 
         # FOR WHICH DIRECTION DRONE NEEDS TO 'KICK OFF' WHEN LEAVING A SIGN
         SignMovements = namedtuple('SignMovements', ['x', 'y'])
@@ -117,50 +111,63 @@ class TeamLeftDroneNode:
         }
         # PID ERROR ANALYSIS
         self.error_history = np.zeros(200)
-
+        
         self.coord_msg.task_complete = True # BECAUSE WE DON'T HAVE THE OTHER DRONE TO SET THIS TO TRUE
-
+        
         # WAIT FOR EVERYTHING TO INITIALIZE
         rospy.sleep(0.5)
     
     # -- CALLBACKS --
     def score_tracker_callback(self, msg):
+        """
+            Parses string to check if clue_type is one of 1, 2, . . . , 8.
+            If it is, sets self.nn_resp_received flag to True
+        """
         if self.msg_is_clue(msg.data):
             self.nn_resp_received=True
-    
-    # def nn_hsk_callback(self, msg):
-        # self.nn_hsk = True
+        return
     
     def alt_callback(self, msg):
+        """
+            Updates self.altitude to msg.data
+        """
         self.altitude = msg.data
+        return
     
     def coordination_callback(self, msg):
+        """
+            Updates self.coord_msg to value of incoming msg
+        """
         self.coord_msg = msg
         return
     
     def imageF_callback(self, data):
+        """
+            Updates self.side_img to data if self.current_cam is "front"
+        """
         if self.current_cam == "front":
             self.image_callback(data)
         return
     
     def imageD_callback(self, data):
-        """Updates self.down_img with image converted to cv2 bgr8 format"""
+        """
+            Updates self.down_img with image converted to cv2 bgr8 format
+        """
         self.down_img = self.bridge.imgmsg_to_cv2(data, "bgr8")
 
     def image_callback(self, data):
-        """Updates self.side_img with image converted to cv2 bgr8 format"""
+        """
+            Updates self.side_img with image converted to cv2 bgr8 format
+        """
         self.side_img = self.bridge.imgmsg_to_cv2(data, "bgr8")
         return
     
-    # def nn_resp_callback(self,data):
-    #     "sets self.nn_resp_received to True and populates self.nn_response with msg"
-    #     self.nn_response = data
-    #     self.nn_resp_received = True
-    #     return
-    
     def msg_is_clue(self, string):
         """
-            Checks if a message is a clue
+            Checks if a message is a clue by parsing the image string and checking
+            if the clue type field is in "1", "2", . . ., "8"
+            - returns True if this case
+            - returns False otherwise
         """
         team, password, clue_type, clue = string.split(",")
         print(f"{team},{password},{clue_type},{clue}")
@@ -172,32 +179,30 @@ class TeamLeftDroneNode:
         print("INVALID CLUE")
         return False
 
-    
     def is_initialized(self):
         """
-            Returns true if messages have been received from node dependencies:
-            - cameras
+            Returns True if messages have been received from node dependencies:
+            - active side camera (front/back or left/right)
+            - down camera
             - depth sensor
+
+            else returns False
         """
-        # leave out nn handshake for now.
-        # if self.nn_hsk == False:
-        #     return False
-        # else:
-        #     # acknowledge connection
-        #     self.nn_hsk_pub.publish("T")
         if self.altitude is None: return False
         if self.side_img is None: return False
         if self.down_img is None: return False
         return True
 
+    # -- HOME BASE --
     def run(self):
         """
-        Runs state machine
-        - state = approaching   -> PID on object scale and centering
-        - state = querying      -> waiting for score tracker publishes, once publish, move to kickoff
-        - state = kickoff       -> kicking off from read sign so as to not re-read it
-        - state = finished      -> publish to other drone to let them know we're done.
-                                   if they are done, publish to score tracker
+            Runs all processing every cycle per self.UPDATE_HZ 'home base'
+            - waits until all sensor comms are established
+            - publishes current state details to drone's state rostopic
+            - analyzes front camera image to analyze sign readability and drone movement demands
+            - updates self.state per results of analysis and previous cycle
+            - updates movement demands (fwd/back, left/right, yaw, up/down) per analysis and current state
+            - publishes movement demands to cmd_vel rostopic for application by subscribing node (drone_cmd_bridge)
         """
         rate = rospy.Rate(self.UPDATE_HZ)
         
@@ -220,9 +225,12 @@ class TeamLeftDroneNode:
             # update state per results of last cycle
             self.update_state()
 
+            # check if finished and send end msg if so
+            self.endmsg_if_finished()
+
             # update movement demands based on image analysis and current state
             self.update_mov_demands()
-            
+
             # update command bridge with movement demands
             self.abs_elev_pub.publish(self.abs_elev_target)
             self.vel_pub.publish(self.current_twist)
@@ -232,18 +240,19 @@ class TeamLeftDroneNode:
         
     def update_state(self):
         """
-            Updates the state of the drone based on self.current_sign value and
-            state change flags.
-            - increments self.current_sign if self.ready_to_look == True
-            - switches self.current_cam when switching in to LOOKING or SETTING states
-            per self.sign_dict[self.current_sign]
+            Updates drone's current state based on state flags, and previous state.
+            - clears all PID errors when switching from:
+                - APPROACH -> QUERY
+                - QUERY -> KICKOFF
+                - KICKOFF -> APPROACH
+            - clears state flags when executing associated state change
         """
         previous_state = self.state
 
         # START -> ELEVATING
         if self.state==self.START:
             self.start_timer += 1
-            if self.nn_resp_received==True:
+            if self.nn_resp_received==True or self.start_timer > self.START_CYCLES:
                 self.nn_resp_received = False
                 self.abs_elev_target=0.3
                 self.state=self.ELEVATING
@@ -260,7 +269,6 @@ class TeamLeftDroneNode:
         elif previous_state == self.APPROACH_STATE and self.ready_to_query:
             self.ready_to_query = False
             self.state = self.QUERY_STATE
-            self.clear_PID_errors()
         
         # QUERY -> KICKOFF
         elif previous_state == self.QUERY_STATE and self.ready_to_kickoff:
@@ -284,25 +292,31 @@ class TeamLeftDroneNode:
                 self.state = self.APPROACH_STATE
                 self.clear_PID_errors()
 
-
         # CHECK IF WE'RE FINISHED.
         if self.current_sign > self.LAST_SIGN_NUM:
             self.state = self.FINISHED_STATE
             return
-        
+
+        return
+    
+    def endmsg_if_finished(self):
+        """
+            Publishes end msg to /score_tracker if state is FINISHED
+            and the RIGHT DRONE (team partner) is also finished
+        """
         if self.state == self.FINISHED_STATE:
             # check if other drone already finished, if they did, kill comp
             # LEFT DRONE is responsible for killing comp
             if self.coord_msg.task_complete == True:
                 self.score_pub.publish(self.END_MSG)
-
         return
     
     def update_mov_demands(self):
         """
-            Checks if map centroid - frame centroid error < threshold
-            - if map centroid - frame centroid error < threshold for 1s, then switch self.state = "commanding"
-            - always performs PID control to try to prevent drifting error due to wind
+            Updates self.current_twist based on PID on errors from image analysis.
+            - if state is ELEVATING, overwrites errors with constants
+            - if state is START, sets all twists to 0
+            - if state is KICKOFF, applies kickoff_movements
         """
         # always perform PID ...
         self.current_twist.linear.x = self.x_pid.update(self.error_x, 1.0 / self.UPDATE_HZ)
@@ -338,7 +352,6 @@ class TeamLeftDroneNode:
             self.current_twist.linear.y = 0.0
             self.current_twist.angular.z = 0.0
 
-
         return
     
     def analyze_front_img(self):
@@ -354,7 +367,7 @@ class TeamLeftDroneNode:
         
         bgr_img = self.side_img
         # check if the sign 
-        sign_readable = self.sign_readable(bgr_img)    
+        sign_readable, area = self.sign_readable(bgr_img)    
         
         if self.state == self.APPROACH_STATE and sign_readable:
             self.ready_to_query = True
@@ -370,6 +383,8 @@ class TeamLeftDroneNode:
         # X, Y, YAW ALIGNMENT ANALYSIS
         self.front_img_to_xyyaw(bgr_img)
 
+        self.show_debug(bgr_img, self.error_ang_z, self.error_x, self.error_y, area, sign_readable)
+        
         # LEFT/RIGHT ALIGNMENT ANALYSIS IF ELEVATING IS BASED ON FRONT CAM
         if self.state == self.ELEVATING:
             self.error_y = 0
@@ -382,8 +397,8 @@ class TeamLeftDroneNode:
             - if there are multiple sign signatures, takes the left-most signature
             - error_x is determined based on the height of the side of the sign
         """
-        GOAL_HEIGHT_RATIO = 0.05
-        GOAL_HEIGHT_RATIO_APPROACH = 0.05
+        GOAL_HEIGHT_RATIO = 0.02
+        GOAL_HEIGHT_RATIO_APPROACH = 0.01
 
         goal_ratio = GOAL_HEIGHT_RATIO
         if self.state==self.APPROACH_STATE:
@@ -392,12 +407,10 @@ class TeamLeftDroneNode:
         # crop out the top third of the image
         img_h = bgr_img.shape[0]
         img_w = bgr_img.shape[1]
+
         roi_y_start = img_h // 3
         roi_y_end = img_h
         roi_bgr = bgr_img[roi_y_start:roi_y_end,  : ]
-
-        # GET SIGNS AND FILL THEM IN FOR
-        roi_mod = roi_bgr.copy()
 
         # GET RID OF THE WHITE INSIDE THE BLUE SIGNS
         blue_contours = self.get_blue_contours(roi_bgr)
@@ -408,29 +421,16 @@ class TeamLeftDroneNode:
             x, y, w, h = cv.boundingRect(hull)
             sign_height = h
             ratio = sign_height / img_h
-            depth_error = (goal_ratio - ratio) * img_w
-            self.error_x = depth_error
+            max_depth_error = 1-goal_ratio
+            depth_error = (goal_ratio - ratio) * max_depth_error # normalize between [-1,1]
             cX = x + w//2
-            self.error_y = img_w//2 - cX
-            self.error_ang_z = img_w//2 - cX
+            self.error_x        = depth_error
+            self.error_y        = (img_w//2 - cX)/(img_w//2) # normalize between [-1,1]
+            self.error_ang_z    = (img_w//2 - cX)/(img_w//2) # normalize between [-1,1]
 
         # if no blue, set error_x to zero to prevent spinning out
         else:
             self.error_x = 0
-
-        # Create the text string
-        textz = f"Error Ang Z: {self.error_ang_z:.2f}"
-        texty = f"Error Lin Y: {self.error_x:.2f}"
-        textx = f"Error Lin X: {self.error_y:.2f}"
-        
-        cv.putText(img=roi_bgr, text=textx, org=(20, 40), fontFace=cv.FONT_HERSHEY_SIMPLEX,
-                   fontScale=0.8, color=(0, 0, 255),thickness=2)
-        cv.putText(img=roi_bgr, text=texty, org=(20, 60), fontFace=cv.FONT_HERSHEY_SIMPLEX,
-                   fontScale=0.8, color=(0, 0, 255),thickness=2)
-        cv.putText(img=roi_bgr, text=textz, org=(20, 80), fontFace=cv.FONT_HERSHEY_SIMPLEX,
-                   fontScale=0.8, color=(0, 0, 255),thickness=2)
-        cv.imshow("Front centering", roi_bgr)
-        cv.waitKey(1)
 
         return
 
@@ -462,34 +462,6 @@ class TeamLeftDroneNode:
 
         return
 
-    def front_img_to_yaw(self, bgr_img):
-        """
-            Takes the image from the front camera, analyzes the bottom fourth and adjusts yaw to
-            centroid of road if in ELEVATING mode
-            If in any other mode 
-        """
-        # crop the image to the bottom fourth
-        img_h = bgr_img.shape[0]
-        img_w = bgr_img.shape[1]
-        roi_y_start = (img_h * 3)//4
-        roi_y_end = img_h
-        roi_bgr = bgr_img[roi_y_start:roi_y_end,  : ]
-
-        M = self.get_line_moments(roi_bgr)
-        if M["m00"] > 0:
-            cX = int(M["m10"] / M["m00"])
-            img_center = img_w // 2
-            cv.circle(roi_bgr, center=(cX, img_h//8), radius=20, color=(0,0,255), thickness=-1)
-
-            # error > 0 -> pivot right
-            # error < 0 -> pivot left
-            error = img_center - cX
-            self.error_ang_z = error
-        else:
-            self.error_ang_z = 0
-
-        return
-
     def analyze_down_img(self):
         """
             Analyzes the image from the bottom camera of the drone and adjusts, based on self.state:
@@ -518,24 +490,6 @@ class TeamLeftDroneNode:
             # error < 0 -> turn left
             error = img_center - cX
             self.error_y = error
-
-            # Create the text string
-            text = f"Error Y: {self.error_y}"
-            
-            cv.putText(
-                img=roi_bgr, 
-                text=text, 
-                org=(20, 40),              # Coordinates (x, y) from top-left
-                fontFace=cv.FONT_HERSHEY_SIMPLEX, 
-                fontScale=1.0, 
-                color=(0, 0, 255),
-                thickness=2
-            )
-            # draw a vertical line where the drone thinks the line is
-            cv.line(roi_bgr, (cX, 0), (cX, roi_y_end), (255, 0, 0), 2)
-        
-        self.draw_error_plot(roi_bgr)
-        cv.imshow("Line following", roi_bgr)
 
         return
 
@@ -585,21 +539,21 @@ class TeamLeftDroneNode:
 
     def sign_readable(self, cv_image):
         """
-            Masks image for the blue color of the sign. If the sign is fully in frame and also large enough,
-            return true to indicate that sign may be readable by our neural network.
+            Masks image for the blue color of the sign.
+            If sign is fully in frame and large enough, return True to indicate that sign may be readable by our neural network.
             - conditions for readability:
                 - threshold_upper > contour area > threshold_lower (to ensure sign is large enough in frame but not just a corner)
                 - centroid of contour associated with sign border is near center of image
                 - modifies the x_error and y_error for PID centering if sign border is detected, to try to center the drone over the sign for better reads.
         """
-        THRSHOLD_LOWER = 1000
+        THRSHOLD_LOWER = 3000
         THRSHOLD_UPPER = 50000
         sign_readable = False
+        area=0
 
         try:
             roi_bgr = cv_image
             contours = self.get_blue_contours(roi_bgr)
-            
             if len(contours) > 0:
                 # take convex hull of contours to overcome interior countour paths
                 largest_contour = max(contours, key=cv.contourArea)
@@ -620,36 +574,9 @@ class TeamLeftDroneNode:
                 if THRSHOLD_LOWER < area < THRSHOLD_UPPER:
                     sign_readable = True
             
-                # Create the text string
-                text = f"Area: {area}"
-                readable = f"Readable: {sign_readable}"
-                
-                cv.putText(
-                    img=cv_image, 
-                    text=text, 
-                    org=(20, 50),              # Coordinates (x, y) from top-left
-                    fontFace=cv.FONT_HERSHEY_SIMPLEX, 
-                    fontScale=0.8, 
-                    color=(0, 255, 0),               # White for Grayscale/Mask
-                    thickness=2
-                )
-
-                cv.putText(
-                    img=cv_image, 
-                    text=readable, 
-                    org=(20, 90),              # Coordinates (x, y) from top-left
-                    fontFace=cv.FONT_HERSHEY_SIMPLEX, 
-                    fontScale=0.8, 
-                    color=(0, 255, 0),               # White for Grayscale/Mask
-                    thickness=2
-                )
-                
-            cv.imshow(self.window_name, cv_image)
-            cv.waitKey(1)
-            
         except CvBridgeError as e:
             rospy.logerr(f"CvBridge Error: {e}")
-        return sign_readable
+        return sign_readable, area
     
     def get_blue_contours(self, roi_bgr):
         """
@@ -669,6 +596,14 @@ class TeamLeftDroneNode:
         return contours
 
     def make_state_msg(self):
+        """
+            Creates a string state message including:
+            - current state
+            - x velocity
+            - y velocity
+            - kickoff cycle
+            - start cycle
+        """
         # Map integer states to readable strings
         state_names = {
             self.START: "starting",
@@ -687,13 +622,14 @@ class TeamLeftDroneNode:
             f"{' || current sign:':<15} {self.current_sign}"
             f"{' || velocity x:':<15} {self.current_twist.linear.x:>8.3f}"
             f"{' || velocity y:':<15} {self.current_twist.linear.y:>8.3f}"
-            f"{' || kickoff cycle:':<15} {self.kickoff_timer:>8.3f}"
+            f"{' || kickoff cycle:':<15} {self.kickoff_timer:>8.1f}"
+            f"{' || start cycle:':<15} {self.start_timer:>8.1f}"
         )
         return msg 
 
     def draw_error_plot(self, frame):
         """
-        Draws a scrolling error plot across the top of the frame.
+            Draws a scrolling error plot across the top of the frame.
         """
         plot_h = 80  # Height of the plot area
         plot_w = 200 # Width of the plot (matching history buffer)
@@ -731,6 +667,25 @@ class TeamLeftDroneNode:
         cv.putText(frame, "Y-Error Hist", (img_w - plot_w - 10, 25), 
                    cv.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1) 
     
+    def show_debug(self, bgr_img, error_ang_z, error_x, error_y, area, sign_readable):
+        # Create the text string
+        textz = f"Error Ang Z: {error_ang_z:.2f}"
+        texty = f"Error Lin Y: {error_x:.2f}"
+        textx = f"Error Lin X: {error_y:.2f}"
+        textA = f"Area: {area:.2f} || Readable: {sign_readable}"
+        
+        cv.putText(img=bgr_img, text=textx, org=(20, 40), fontFace=cv.FONT_HERSHEY_SIMPLEX,
+                   fontScale=0.7, color=(0, 0, 255),thickness=2)
+        cv.putText(img=bgr_img, text=texty, org=(20, 60), fontFace=cv.FONT_HERSHEY_SIMPLEX,
+                   fontScale=0.7, color=(0, 0, 255),thickness=2)
+        cv.putText(img=bgr_img, text=textz, org=(20, 80), fontFace=cv.FONT_HERSHEY_SIMPLEX,
+                   fontScale=0.7, color=(0, 0, 255),thickness=2)
+        cv.putText(img=bgr_img, text=textA, org=(20, 100), fontFace=cv.FONT_HERSHEY_SIMPLEX,
+                   fontScale=0.7, color=(0, 0, 255),thickness=2)
+        cv.imshow("Front Image", bgr_img)
+        cv.waitKey(1)
+        return
+    
     def clear_PID_errors(self):
         """
             Clears integral and derivative errors in both x and y.
@@ -744,22 +699,26 @@ class TeamLeftDroneNode:
         self.y_pid.previous_error = 0 
     
     def get_sigmoid_value(self, current_cycle):
+        """
+            Returns the value of the sigmoid function at the current timestep
+            where the sigmoid goes from 0 to 1 over self.KO_REC_CYCLES
+        """
         # k=10 ensures that at cycle 0, output is ~0.006 
         # and at max cycle, output is ~0.993
         k = 10 
+        d=0.5
         
         # normalize current cycle to 0.0 - 1.0
         normalized_x = float(current_cycle) / float(self.KO_REC_CYCLES)
         
         # Shift and apply steepness
-        # This maps 0.0 -> 1.0 into -5.0 -> +5.0
-        z = k * (normalized_x - 0.5)
+        z = k * (normalized_x - d)
         
         # Calculate Sigmoid
         return 1 / (1 + math.exp(-z))
 
 class PIDController:
-    """Simple PID controller for stabilizing in plane."""
+    """Simple PID controller"""
     def __init__(self, kp, ki, kd):
         self.kp = kp
         self.ki = ki
@@ -769,14 +728,14 @@ class PIDController:
     
     def update(self, error, dt):
         """
-        Simple PID controller to stabilize the drone's position when it has owner ship.
-         - error: difference between map centroid and drone frame centre
-         - dt: time step in seconds
-         Returns the control output velocity to apply.
+            Simple PID controller.
+            - error: difference between map centroid and drone frame centre
+            - dt: time step in seconds
+            Returns the control output velocity to apply.
         """
         leak_coeff = 0.9
         self.integral += leak_coeff * error * dt
-        max(-1.0, min(1.0, self.integral)) # clamp integral to prevent runaway
+        self.integral = max(-1.0, min(1.0, self.integral)) # clamp integral to prevent runaway
         derivative = (error - self.previous_error) / dt if dt > 0 else 0
         output = self.kp * error + self.ki * self.integral + self.kd * derivative
         self.previous_error = error

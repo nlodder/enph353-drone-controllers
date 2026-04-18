@@ -670,8 +670,8 @@ class TeamLeftDroneNode:
     def show_debug(self, bgr_img, error_ang_z, error_x, error_y, area, sign_readable):
         # Create the text string
         textz = f"Error Ang Z: {error_ang_z:.2f}"
-        texty = f"Error Lin Y: {error_x:.2f}"
-        textx = f"Error Lin X: {error_y:.2f}"
+        texty = f"Error Lin Y: {error_y:.2f}"
+        textx = f"Error Lin X: {error_x:.2f}"
         textA = f"Area: {area:.2f} || Readable: {sign_readable}"
         
         cv.putText(img=bgr_img, text=textx, org=(20, 40), fontFace=cv.FONT_HERSHEY_SIMPLEX,
